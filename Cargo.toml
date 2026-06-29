@@ -2,6 +2,7 @@
 name = "networkcopy"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 rayon = "1.10"
