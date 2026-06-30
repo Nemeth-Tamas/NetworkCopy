@@ -876,17 +876,25 @@ pub fn relaunch_as_admin() -> std::io::Result<()> {
     {
         let current_exe = std::env::current_exe()?;
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut powershell_args = format!(
-            "Start-Process -FilePath '{}' -ArgumentList ",
-            current_exe.to_string_lossy()
-        );
-        let escaped_args: Vec<String> = args.iter().map(|arg| format!("'{}'", arg)).collect();
-        powershell_args.push_str(&format!("@({})", escaped_args.join(",")));
-        powershell_args.push_str(" -Verb RunAs");
+        
+        // Escape single quotes for PowerShell filepath
+        let escaped_exe = current_exe.to_string_lossy().replace('\'', "''");
+        
+        let mut powershell_cmd = format!("Start-Process -FilePath '{}'", escaped_exe);
+        
+        if !args.is_empty() {
+            let escaped_args: Vec<String> = args
+                .iter()
+                .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+                .collect();
+            powershell_cmd.push_str(&format!(" -ArgumentList @({})", escaped_args.join(",")));
+        }
+        
+        powershell_cmd.push_str(" -Verb RunAs");
 
         std::process::Command::new("powershell")
             .arg("-Command")
-            .arg(&powershell_args)
+            .arg(&powershell_cmd)
             .spawn()?;
         std::process::exit(0);
     }
