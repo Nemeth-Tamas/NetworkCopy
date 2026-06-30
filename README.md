@@ -72,6 +72,7 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - `--include <pattern>`: Glob patterns to include in scanning (e.g. `*.rs`).
  - `--exclude <pattern>`: Glob patterns to exclude from scanning (e.g. `target/*`).
  - `--discovery-port <port>`: UDP discovery port (default: `7879`).
+ - `--encrypt`: Enable ChaCha20-Poly1305 stream encryption (requires `--auth`).
  
  **`receive` command options:**
  - `dst_dir`: Destination directory.
@@ -82,6 +83,7 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - `--auth <key>`: HMAC-SHA256 pre-shared secret key for secure transmission.
  - `--discovery-port <port>`: UDP discovery port (default: `7879`).
  - `--yes`: Bypass interactive prompts (e.g. folder picker in loop mode).
+ - `--encrypt`: Enable ChaCha20-Poly1305 stream encryption (requires `--auth`).
 
  **`preset` command options:**
  - `path`: Path to JSON preset configuration file (defines a send or receive job).
@@ -93,6 +95,7 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - `--duration <secs>`: Duration of the benchmark test in seconds (default: `5`).
  - `--yes`: Bypass interactive pairing/auth prompts.
  - `--auth <key>`: HMAC authentication key.
+ - `--encrypt`: Enable ChaCha20-Poly1305 stream encryption (requires `--auth`).
  
  #### Examples
  
@@ -148,6 +151,15 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
     
     # Sender (Client):
     ./networkcopy.exe benchmark --ip 192.168.1.50 --duration 10
+    ```
+
+ 7. **Opt-in Stream Encryption (ChaCha20-Poly1305)**:
+    ```powershell
+    # Receiver:
+    ./networkcopy.exe receive "C:\Dest" --auth "MySecretKey" --encrypt
+    
+    # Sender:
+    ./networkcopy.exe send "C:\Source" --auth "MySecretKey" --encrypt
     ```
  
  ### 🖱️ Interactive Mode
@@ -205,4 +217,4 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - [x] **LAN Benchmark Mode**: Network-only speed testing without disk writes.
  
  ### 🔒 v2.1 (Optional Hardening)
- - [ ] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 or AES-GCM (implies `--auth` and requires pairing code).
+ - [x] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 stream encryption (implies `--auth`).

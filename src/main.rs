@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "networkcopy", version = "2.0.0", about = "Fast P2P Parallel File Copy Tool")]
+#[command(name = "networkcopy", version = "2.1.0", about = "Fast P2P Parallel File Copy Tool")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
