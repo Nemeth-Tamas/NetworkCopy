@@ -99,36 +99,72 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  
  #### Examples
  
- 1. **Secure Copy (HMAC Authentication)**:
+ 1. **Windows-to-Windows (Standard Copy)**:
     ```powershell
     # Receiver:
-    ./networkcopy.exe receive "C:\Dest" --auth "MySecretKey"
-    
-    # Sender:
-    ./networkcopy.exe send "C:\Source" --auth "MySecretKey"
+    ./networkcopy.exe receive "D:\Dest"
+ 
+    # Sender (using UDP Auto-Discovery):
+    ./networkcopy.exe send "C:\Source"
     ```
  
- 2. **Filtered & Verified Copy (Exclude target folder and verify using CRC32)**:
+ 2. **Linux-to-Linux (Standard Copy preserving Executable bits)**:
+    ```bash
+    # Receiver:
+    ./networkcopy receive /home/user/downloads
+ 
+    # Sender:
+    ./networkcopy send /home/user/documents --ip 192.168.1.12
+    ```
+ 
+ 3. **Cross-Platform Copy (Windows to Linux)**:
+    All directories, Unicode characters, and paths are normalized.
+    ```bash
+    # On Linux Receiver:
+    ./networkcopy receive /var/www/html
+ 
+    # On Windows Sender:
+    ./networkcopy.exe send "C:\WebsiteFiles" --ip 192.168.1.14
+    ```
+ 
+ 4. **Opt-in Stream Encryption (ChaCha20-Poly1305)**:
+    Encrypts all control flows and data streams using unique keys generated via cryptographically secure OS nonces.
     ```powershell
     # Receiver:
-    ./networkcopy.exe receive "C:\Dest" --verify-existing
-    
+    ./networkcopy.exe receive "C:\Dest" --auth "MySecretPassphrase" --encrypt
+ 
     # Sender:
-    ./networkcopy.exe send "C:\Source" --exclude "target/*" --exclude "node_modules/*" --verify-existing
+    ./networkcopy.exe send "C:\Source" --auth "MySecretPassphrase" --encrypt
     ```
  
- 3. **Dry-Run Analysis**:
+ 5. **Authenticated but Unencrypted Copy**:
+    Uses HMAC-SHA256 control packet signatures to authenticate incoming streams but bypasses cipher wrapping for absolute maximum throughput on old CPUs:
     ```powershell
-    ./networkcopy.exe send "C:\Source" --dry-run
+    # Receiver:
+    ./networkcopy.exe receive "C:\Dest" --auth "MySecretPassphrase"
+ 
+    # Sender:
+    ./networkcopy.exe send "C:\Source" --auth "MySecretPassphrase"
     ```
  
- 4. **Persistent Loop Mode (IT shop automation)**:
+ 6. **LAN Benchmark Mode (Network Speed Testing without Disk IO)**:
+    Useful to verify network flooding throughput without hardware I/O bottlenecks.
+    ```powershell
+    # Receiver (Server):
+    ./networkcopy.exe benchmark
+ 
+    # Sender (Client):
+    ./networkcopy.exe benchmark --ip 192.168.1.50 --duration 10
+    ```
+ 
+ 7. **Persistent Loop Mode (Service loop)**:
+    Ideal for automated technician labs:
     ```powershell
     ./networkcopy.exe receive "C:\Incoming" --loop-mode
     ```
-
- 5. **JSON Job Presets**:
-    Create a preset configuration file `transfer_job.json`:
+ 
+ 8. **JSON Job Presets**:
+    Save configuration parameters inside a `preset.json`:
     ```json
     {
       "role": "send",
@@ -139,27 +175,9 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
       "yes": true
     }
     ```
-    Execute the preset job:
+    Execute using:
     ```powershell
-    ./networkcopy.exe preset transfer_job.json
-    ```
-
- 6. **LAN Benchmark Mode (Network Speed Testing without Disk IO)**:
-    ```powershell
-    # Receiver (Server):
-    ./networkcopy.exe benchmark
-    
-    # Sender (Client):
-    ./networkcopy.exe benchmark --ip 192.168.1.50 --duration 10
-    ```
-
- 7. **Opt-in Stream Encryption (ChaCha20-Poly1305)**:
-    ```powershell
-    # Receiver:
-    ./networkcopy.exe receive "C:\Dest" --auth "MySecretKey" --encrypt
-    
-    # Sender:
-    ./networkcopy.exe send "C:\Source" --auth "MySecretKey" --encrypt
+    ./networkcopy.exe preset preset.json
     ```
  
  ### 🖱️ Interactive Mode
@@ -218,3 +236,11 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  
  ### 🔒 v2.1 (Optional Hardening)
  - [x] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 stream encryption (implies `--auth`).
+ 
+ ### 🎨 v2.2 (UX, TUI, and Cross-Platform Hardening)
+ - [x] **Premium Interactive Wizard**: Nice terminal menus, configuration wizard, and interactive setup flows using `dialoguer`.
+ - [x] **Desktop Environment Detection**: Linux GUI folder picker fallback to terminal directory prompt if Wayland/X11 are not active.
+ - [x] **Resume Integrity Verification**: Verification of entire merged files' CRC32 after partial resume to prevent corrupted prefixes.
+ - [x] **Cryptographic Randomness**: Secure OS random challenges and pairing codes using `rand::rngs::OsRng`.
+ - [x] **Explicit Benchmark Cleanup**: Prevention of socket/thread hangs during sequential flood benchmarks.
+ - [x] **Symlink Safety Policy**: Skip symbolic links by default to avoid directory recursion loops or copying out-of-tree files.
