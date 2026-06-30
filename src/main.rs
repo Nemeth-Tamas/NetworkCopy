@@ -234,7 +234,7 @@ fn main() {
             println!("🔌 Target: {}", receiver_addr);
             println!("🗜️ LZ4 Compression: {}", compress);
             if let Err(e) = sender::run_sender(src_dir, &receiver_addr, streams, compress, options) {
-                eprintln!("❌ Sender Error: {}", e);
+                print_sender_troubleshooting(&e);
                 std::process::exit(1);
             }
         }
@@ -268,7 +268,7 @@ fn main() {
             println!("📂 Destination: {:?}", dst_dir);
             println!("👂 Listening on {}...", listen_addr);
             if let Err(e) = receiver::run_receiver(dst_dir, &listen_addr, !yes, options) {
-                eprintln!("❌ Receiver Error: {}", e);
+                print_receiver_troubleshooting(&e, port);
                 std::process::exit(1);
             }
         }
@@ -471,8 +471,18 @@ fn run_interactive_wizard() {
         .unwrap_or(2);
         
     match choice {
-        0 => run_sender_wizard(),
-        1 => run_receiver_wizard(),
+        0 => {
+            run_sender_wizard();
+            println!("\nPress Enter to exit...");
+            let mut tmp = String::new();
+            let _ = std::io::stdin().read_line(&mut tmp);
+        }
+        1 => {
+            run_receiver_wizard();
+            println!("\nPress Enter to exit...");
+            let mut tmp = String::new();
+            let _ = std::io::stdin().read_line(&mut tmp);
+        }
         _ => {
             println!("Exiting.");
         }
@@ -692,7 +702,7 @@ fn run_sender_wizard() {
         
     if proceed {
         if let Err(e) = sender::run_sender(src_dir, &receiver_addr, streams, use_compression, options) {
-            eprintln!("❌ Sender Error: {}", e);
+            print_sender_troubleshooting(&e);
         }
     } else {
         println!("Cancelled.");
@@ -797,6 +807,22 @@ fn run_receiver_wizard() {
     println!("========================================\n");
     
     if let Err(e) = receiver::run_receiver(dst_dir, &listen_addr, true, options) {
-        eprintln!("❌ Receiver Error: {}", e);
+        print_receiver_troubleshooting(&e, port);
     }
+}
+
+fn print_sender_troubleshooting(err: &std::io::Error) {
+    eprintln!("❌ Sender Error: {}", err);
+    eprintln!("\n💡 Troubleshooting Tips:");
+    eprintln!("   1. Verify the Receiver is actually running and listening.");
+    eprintln!("   2. Check that both machines are on the same local network / Wi-Fi subnet.");
+    eprintln!("   3. Ensure Windows Firewall or other security software is not blocking TCP port 7878 / UDP port 7879.");
+    eprintln!("   4. Double-check that the Receiver's IP address is correct.");
+}
+
+fn print_receiver_troubleshooting(err: &std::io::Error, port: u16) {
+    eprintln!("❌ Receiver Error: {}", err);
+    eprintln!("\n💡 Troubleshooting Tips:");
+    eprintln!("   1. Check if another process is already using port {}.", port);
+    eprintln!("   2. Ensure the destination directory path is valid and writeable.");
 }
