@@ -7,6 +7,13 @@ A high-performance, memory-efficient, multi-stream P2P file sender written in Ru
 
 ---
 
+## 🛡️ Trust & Security Model
+NetworkCopy is designed primarily as a **trusted-LAN high-speed file copy utility**. 
+- **Default Mode**: Speed-focused, unencrypted, and unauthenticated to maximize network saturation and minimize CPU/memory overhead on older hardware.
+- **Opt-In Security**: Secure configurations (such as HMAC metadata authentication `--auth` and pairing codes) are fully opt-in via CLI flags and interactive prompts, allowing you to trade minimal speed for trust validation when copying over untrusted or shared local networks.
+
+---
+
 ## 🛠️ How It Works (Design & Architecture)
 
 To bypass the typical slowdowns associated with standard file-sharing protocols (which suffer from start-stop overhead, disk-seeking latency on tiny files, and single-stream network bottlenecks), NetworkCopy uses a custom execution flow:
@@ -84,8 +91,25 @@ cargo test -- --nocapture
 
 ## 🗺️ Roadmap & Future TODOs
 
-- [ ] **Cross-Platform Compatibility**:
-  - Support Win-to-Win, Linux-to-Linux, Win-to-Linux, and Linux-to-Win file transfers.
-  - Standardize cross-platform path handling and file time operations.
-  - *Note: No macOS support planned (avoiding Apple Developer license fees).*
-- [ ] **Transfer Resume from Interruptions**: Support resuming partially transferred files by scanning `.tmp` file sizes and continuing from offset bytes.
+### 🎯 v1.1 (Polish & Usability)
+- [ ] **Path Sanitization**: Reject unsafe relative path tricks (like `..`, absolute paths, Windows reserved names).
+- [ ] **Improved Temp Files**: Append `.networkcopy-tmp` to avoid extension stripping.
+- [ ] **Clap CLI**: Full argument parser with configurable ports, binds, streams, and compress options.
+- [ ] **Interactive Receiver Loop Mode**: Loop option that prompts receiver for destination folder per transfer.
+- [ ] **Robust Smart Resume**: `--verify-existing` to checksum existing destination files via CRC32 before skipping.
+- [ ] **Dry Run Mode**: `--dry-run` to dry-run scanning, skip detection, and bucket splitting.
+- [ ] **Include/Exclude Filters**: Wildcard filters (e.g. `--exclude node_modules`, `--include "*.jpg"`).
+- [ ] **Pairing Code Verification**: 4-digit numeric code pairing confirmation.
+- [ ] **HMAC Session Authentication**: Opt-in `--auth <key>` mode signing control packets & discovery via HMAC-SHA256.
+
+### 🚀 v2.0 (Serious Capability)
+- [ ] **Linux Cross-Platform**: Win-to-Win, Linux-to-Linux, Win-to-Linux, and Linux-to-Win path and permission handling.
+- [ ] **Partial File Resume**: Continue copying interrupted transfers from `.tmp` byte offset.
+- [ ] **Protocol Versioning**: Handshake checks for protocol versions and supported features.
+- [ ] **Transfer Presets & Manifests**: Save jobs (excludes, directories, targets) as reusable configurations.
+- [ ] **TUI (Terminal User Interface)**: Rich live terminal display of streams, speeds, and file progress.
+- [ ] **LAN Benchmark Mode**: Network-only speed testing without disk writes.
+
+### 🔒 v2.1 (Optional Hardening)
+- [ ] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 or AES-GCM (implies `--auth` and requires pairing code).
+
