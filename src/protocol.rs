@@ -1,10 +1,71 @@
 use std::io::{Read, Write};
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub rel_path: String,
     pub size: u64,
     pub modified: u64, // Last modification time in seconds since Unix Epoch
+    pub crc32: u32,    // CRC32 checksum of the file
+}
+
+/// Sanitizes relative paths to prevent directory traversal and OS exploits.
+pub fn sanitize_rel_path(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+
+    // Reject absolute checks
+    if path.starts_with('/') || path.starts_with('\\') {
+        return None;
+    }
+
+    // Windows drive prefixes check (e.g. C:)
+    if path.chars().next()?.is_alphabetic() && path.chars().nth(1) == Some(':') {
+        return None;
+    }
+
+    let p = Path::new(path);
+    let mut normalized = Vec::new();
+
+    for comp in p.components() {
+        match comp {
+            Component::Normal(os_str) => {
+                let comp_str = comp_str_to_safe_string(os_str.to_str()?)?;
+                normalized.push(comp_str);
+            }
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                // Reject absolute prefixes and parent traversals
+                return None;
+            }
+            Component::CurDir => {}
+        }
+    }
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(normalized.join("/"))
+}
+
+fn comp_str_to_safe_string(comp_str: &str) -> Option<String> {
+    // Reject trailing space or dot
+    if comp_str.ends_with(' ') || comp_str.ends_with('.') {
+        return None;
+    }
+
+    // Check Windows reserved device names
+    let lower = comp_str.to_lowercase();
+    let base_name = lower.split('.').next().unwrap_or("");
+    match base_name {
+        "con" | "prn" | "aux" | "nul" => return None,
+        s if s.starts_with("com") && s.len() == 4 && s.chars().nth(3).map_or(false, |c| c.is_ascii_digit()) => return None,
+        s if s.starts_with("lpt") && s.len() == 4 && s.chars().nth(3).map_or(false, |c| c.is_ascii_digit()) => return None,
+        _ => {}
+    }
+
+    Some(comp_str.replace('\\', "/"))
 }
 
 /// Serializes the file index into the writer.
@@ -22,6 +83,8 @@ pub fn write_index<W: Write>(writer: &mut W, files: &[FileEntry]) -> std::io::Re
         writer.write_all(&file.size.to_be_bytes())?;
         // Write modification time as u64 (big-endian)
         writer.write_all(&file.modified.to_be_bytes())?;
+        // Write CRC32 checksum as u32 (big-endian)
+        writer.write_all(&file.crc32.to_be_bytes())?;
     }
     writer.flush()?;
     Ok(())
@@ -52,7 +115,11 @@ pub fn read_index<R: Read>(reader: &mut R) -> std::io::Result<Vec<FileEntry>> {
         reader.read_exact(&mut modified_bytes)?;
         let modified = u64::from_be_bytes(modified_bytes);
 
-        files.push(FileEntry { rel_path, size, modified });
+        let mut crc_bytes = [0u8; 4];
+        reader.read_exact(&mut crc_bytes)?;
+        let crc32 = u32::from_be_bytes(crc_bytes);
+
+        files.push(FileEntry { rel_path, size, modified, crc32 });
     }
 
     Ok(files)
@@ -148,5 +215,26 @@ impl<R: Read> Read for StreamReader<R> {
             StreamReader::Raw(s) => s.read(buf),
             StreamReader::Compressed(d) => d.read(buf),
         }
+    }
+}
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+pub fn compute_hmac(key: &str, data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+pub fn verify_hmac(key: &str, data: &[u8], signature: &[u8]) -> bool {
+    if let Ok(mut mac) = HmacSha256::new_from_slice(key.as_bytes()) {
+        mac.update(data);
+        mac.verify_slice(signature).is_ok()
+    } else {
+        false
     }
 }

@@ -13,8 +13,19 @@ use rayon::prelude::*;
 use crate::protocol::{self, FileEntry};
 
 /// Recursively scas a directory in parallel using Rayon.
-pub fn scan_directory(base_dir: &Path) -> std::io::Result<Vec<FileEntry>> {
-    fn walk(dir: PathBuf, base_dir: PathBuf) -> std::io::Result<Vec<FileEntry>> {
+pub fn scan_directory(
+    base_dir: &Path,
+    includes: &[String],
+    excludes: &[String],
+    calculate_crc32: bool,
+) -> std::io::Result<Vec<FileEntry>> {
+    fn walk(
+        dir: PathBuf,
+        base_dir: PathBuf,
+        includes: Arc<Vec<String>>,
+        excludes: Arc<Vec<String>>,
+        calculate_crc32: bool,
+    ) -> std::io::Result<Vec<FileEntry>> {
         let mut entries = Vec::new();
         let read_dir = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
@@ -45,27 +56,47 @@ pub fn scan_directory(base_dir: &Path) -> std::io::Result<Vec<FileEntry>> {
             if meta.is_dir() {
                 subdirs.push(path);
             } else if meta.is_file() {
-                // Test openability to skip locked/inaccessible files early
-                match std::fs::File::open(&path) {
-                    Ok(_) => {
-                        if let Ok(rel) = path.strip_prefix(&base_dir) {
-                            if let Some(rel_str) = rel.to_str() {
+                if let Ok(rel) = path.strip_prefix(&base_dir) {
+                    if let Some(rel_str) = rel.to_str() {
+                        let rel_path_normalized = rel_str.replace('\\', "/");
+                        
+                        // Apply include/exclude glob filters
+                        if should_skip(&rel_path_normalized, &includes, &excludes) {
+                            continue;
+                        }
+
+                        // Test openability to skip locked/inaccessible files early
+                        match std::fs::File::open(&path) {
+                            Ok(_) => {
                                 let modified = meta.modified()
                                     .map(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH)
                                         .unwrap_or(std::time::Duration::ZERO)
                                         .as_secs())
                                     .unwrap_or(0);
+
+                                let crc32 = if calculate_crc32 {
+                                    match calculate_file_crc32(&path) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            eprintln!("⚠️ Warning: Failed to compute CRC32 for {:?}: {}", path, e);
+                                            continue; // Skip file if we can't read it to calculate checksum
+                                        }
+                                    }
+                                } else {
+                                    0
+                                };
+
                                 entries.push(FileEntry {
-                                    // Standardize path separators to forward slash for cross-platform safety
-                                    rel_path: rel_str.replace('\\', "/"),
+                                    rel_path: rel_path_normalized,
                                     size: meta.len(),
                                     modified,
+                                    crc32,
                                 });
                             }
+                            Err(e) => {
+                                eprintln!("⚠️ Warning: Skipping inaccessible file {:?} (Cannot open: {})", path, e);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ Warning: Skipping inaccessible file {:?} (Cannot open: {})", path, e);
                     }
                 }
             }
@@ -75,9 +106,11 @@ pub fn scan_directory(base_dir: &Path) -> std::io::Result<Vec<FileEntry>> {
             Ok(entries)
         } else {
             // Scan subdirectories in parallel
+            let includes_clone = Arc::clone(&includes);
+            let excludes_clone = Arc::clone(&excludes);
             let sub_results: Result<Vec<Vec<FileEntry>>, std::io::Error> = subdirs
                 .into_par_iter()
-                .map(|subdir| walk(subdir, base_dir.clone()))
+                .map(|subdir| walk(subdir, base_dir.clone(), Arc::clone(&includes_clone), Arc::clone(&excludes_clone), calculate_crc32))
                 .collect();
 
             let flat_results = sub_results?;
@@ -88,7 +121,52 @@ pub fn scan_directory(base_dir: &Path) -> std::io::Result<Vec<FileEntry>> {
         }
     }
 
-    walk(base_dir.to_path_buf(), base_dir.to_path_buf())
+    let includes_arc = Arc::new(includes.to_vec());
+    let excludes_arc = Arc::new(excludes.to_vec());
+    walk(base_dir.to_path_buf(), base_dir.to_path_buf(), includes_arc, excludes_arc, calculate_crc32)
+}
+
+fn should_skip(rel_path: &str, includes: &[String], excludes: &[String]) -> bool {
+    // 1. Exclude checks
+    for pattern in excludes {
+        if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
+            if glob_pattern.matches(rel_path) || rel_path.split('/').any(|comp| glob_pattern.matches(comp)) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Include checks
+    if !includes.is_empty() {
+        let mut matched = false;
+        for pattern in includes {
+            if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
+                if glob_pattern.matches(rel_path) || rel_path.split('/').any(|comp| glob_pattern.matches(comp)) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            return true; // Skip if it doesn't match any include pattern
+        }
+    }
+
+    false
+}
+
+fn calculate_file_crc32(path: &Path) -> std::io::Result<u32> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut hasher = crc32fast::Hasher::new();
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(hasher.finalize())
 }
 
 /// Runs a multi-stream network speedtest to find the optimal number of streams.
@@ -164,10 +242,33 @@ pub fn run_speedtest_client(control_stream: &mut TcpStream, receiver_addr: &str)
     Ok(best_streams)
 }
 
+
+#[derive(Debug, Clone, Default)]
+pub struct SenderOptions {
+    pub includes: Vec<String>,
+    pub excludes: Vec<String>,
+    pub verify_existing: bool,
+    pub dry_run: bool,
+    pub no_discovery: bool,
+    pub auth_key: Option<String>,
+    pub control_port: u16,
+    pub discovery_port: u16,
+    pub auto_accept: bool,
+    pub pairing_code: Option<String>,
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 { return None; }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i+2], 16).ok())
+        .collect()
+}
+
 /// Runs a UDP client socket to scan for a broadcasting Receiver.
-pub fn discover_receiver() -> std::io::Result<Option<String>> {
-    println!("🔍 Scanning local network for Receiver (UDP discovery on port 7879)...");
-    let socket = match std::net::UdpSocket::bind("0.0.0.0:7879") {
+pub fn discover_receiver(discovery_port: u16, auth_key: Option<String>) -> std::io::Result<Option<String>> {
+    println!("🔍 Scanning local network for Receiver (UDP discovery on port {})...", discovery_port);
+    let socket = match std::net::UdpSocket::bind(format!("0.0.0.0:{}", discovery_port)) {
         Ok(s) => s,
         Err(e) => {
             println!("⚠️ Failed to bind UDP discovery socket: {}", e);
@@ -182,10 +283,45 @@ pub fn discover_receiver() -> std::io::Result<Option<String>> {
             let msg = std::str::from_utf8(&buffer[..amt]).unwrap_or("");
             if msg.starts_with("FSTP-RECEIVER:") {
                 let parts: Vec<&str> = msg.split(':').collect();
-                if parts.len() == 2 {
+                if parts.len() == 3 {
+                    if auth_key.is_some() {
+                        println!("⚠️ Discovered receiver does not use authentication, but authentication is required locally!");
+                        return Ok(None);
+                    }
                     let port = parts[1];
                     let ip = src_addr.ip().to_string();
                     return Ok(Some(format!("{}:{}", ip, port)));
+                } else if parts.len() == 5 {
+                    let port = parts[1];
+                    let hostname = parts[2];
+                    let timestamp_str = parts[3];
+                    let sig_hex = parts[4];
+
+                    if let Some(key) = auth_key {
+                        let timestamp = timestamp_str.parse::<u64>().unwrap_or(0);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+
+                        // Prevent replay attack: check if timestamp is within 30 seconds
+                        if now.saturating_sub(timestamp) > 30 && timestamp.saturating_sub(now) > 30 {
+                            println!("⚠️ UDP Discovery authentication signature expired!");
+                            return Ok(None);
+                        }
+
+                        let msg_prefix = format!("FSTP-RECEIVER:{}:{}:{}", port, hostname, timestamp_str);
+                        if let Some(sig_bytes) = hex_decode(sig_hex) {
+                            if protocol::verify_hmac(&key, msg_prefix.as_bytes(), &sig_bytes) {
+                                let ip = src_addr.ip().to_string();
+                                return Ok(Some(format!("{}:{}", ip, port)));
+                            } else {
+                                println!("⚠️ UDP Discovery authentication signature invalid!");
+                            }
+                        }
+                    } else {
+                        println!("⚠️ Discovered receiver uses authentication, but local machine has no auth key configured!");
+                    }
                 }
             }
         }
@@ -203,10 +339,11 @@ pub fn run_sender(
     receiver_addr: &str,
     mut num_streams: usize,
     use_compression: bool,
+    options: SenderOptions,
 ) -> std::io::Result<()> {
     println!("🔍 Indexing source directory: {:?}", src_dir);
     let scan_start = Instant::now();
-    let files = scan_directory(&src_dir)?;
+    let files = scan_directory(&src_dir, &options.includes, &options.excludes, options.verify_existing)?;
     let scan_duration = scan_start.elapsed();
 
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
@@ -225,6 +362,82 @@ pub fn run_sender(
     // Send mode (1 = Send session)
     control_stream.write_all(&[1u8])?;
 
+    // --- AUTHENTICATION HANDSHAKE ---
+    let mut auth_required_byte = [0u8; 1];
+    control_stream.read_exact(&mut auth_required_byte)?;
+    let auth_required = auth_required_byte[0] == 1;
+
+    if auth_required {
+        if let Some(key) = &options.auth_key {
+            // Read 32-byte challenge
+            let mut challenge = [0u8; 32];
+            control_stream.read_exact(&mut challenge)?;
+
+            // Compute HMAC response
+            let response = protocol::compute_hmac(key, &challenge);
+            control_stream.write_all(&response)?;
+
+            // Read validation result
+            let mut result = [0u8; 1];
+            control_stream.read_exact(&mut result)?;
+            if result[0] != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "HMAC authentication failed (Receiver rejected connection)",
+                ));
+            }
+            println!("🔒 HMAC authentication successful!");
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Receiver requires authentication, but no local `--auth` key was provided!",
+            ));
+        }
+    } else if options.auth_key.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Local machine expects authentication, but the Receiver is running in unauthenticated mode!",
+        ));
+    }
+
+    // --- PAIRING CODE HANDSHAKE ---
+    let mut pairing_required_byte = [0u8; 1];
+    control_stream.read_exact(&mut pairing_required_byte)?;
+    let pairing_required = pairing_required_byte[0] == 1;
+
+    if pairing_required {
+        let code = if let Some(c) = &options.pairing_code {
+            c.clone()
+        } else if options.auto_accept {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Pairing code confirmation is required, but `--yes` / automatic confirmation is active without manual pairing input!",
+            ));
+        } else {
+            print!("🔑 Enter pairing code displayed on receiver: ");
+            std::io::stdout().flush().unwrap();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            input.trim().to_string()
+        };
+
+        // Write pairing code length and value
+        let code_bytes = code.as_bytes();
+        control_stream.write_all(&(code_bytes.len() as u32).to_be_bytes())?;
+        control_stream.write_all(code_bytes)?;
+
+        // Read pairing check result
+        let mut pairing_result = [0u8; 1];
+        control_stream.read_exact(&mut pairing_result)?;
+        if pairing_result[0] != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Pairing verification failed (Incorrect pairing code)",
+            ));
+        }
+        println!("🔑 Pairing verification successful!");
+    }
+
     // If stream count is specified as 0, or if we want to auto-tune, run the speedtest
     if num_streams == 0 {
         num_streams = run_speedtest_client(&mut control_stream, receiver_addr)?;
@@ -240,6 +453,9 @@ pub fn run_sender(
     // Send compression selection (1 = LZ4 compression, 0 = raw stream)
     control_stream.write_all(&[if use_compression { 1u8 } else { 0u8 }])?;
 
+    // Send dry-run flag
+    control_stream.write_all(&[if options.dry_run { 1u8 } else { 0u8 }])?;
+
     println!("📤 Sending file index...");
     protocol::write_index(&mut control_stream, &files)?;
 
@@ -253,6 +469,26 @@ pub fn run_sender(
         }
     }
     let total_bytes_to_transfer: u64 = files_to_transfer.iter().map(|f| f.size).sum();
+
+    if options.dry_run {
+        println!("\n================ [ DRY RUN REPORT ] ================");
+        println!("📂 Files Scanned: {}", files.len());
+        println!("⏭️ Files Skipped: {}", files.len() - files_to_transfer.len());
+        println!("📥 Files to Copy: {}", files_to_transfer.len());
+        println!("📊 Total Bytes to Copy: {:.2} MB", total_bytes_to_transfer as f64 / 1_048_576.0);
+        println!("🧵 Parallel Streams Configured: {}", num_streams);
+
+        let buckets = protocol::partition_files(&files_to_transfer, num_streams);
+        println!("\n🧵 Estimated Bucket Splits (Longest Processing Time First):");
+        for (i, bucket) in buckets.iter().enumerate() {
+            let size: u64 = bucket.iter().map(|f| f.size).sum();
+            println!("  Stream {}: {} files ({:.2} MB)", i, bucket.len(), size as f64 / 1_048_576.0);
+        }
+        println!("====================================================");
+        println!("🛑 Dry run complete. Connection terminated.");
+        return Ok(());
+    }
+
     println!(
         "📂 Files to transfer: {}/{} ({:.2} MB). Skipping the rest.",
         files_to_transfer.len(),
@@ -271,6 +507,8 @@ pub fn run_sender(
         ));
     }
     println!("🚀 Receiver is ready! Starting multi-stream transfer...");
+
+    let transfer_start = Instant::now();
 
     // Partition files into load-balanced buckets
     let buckets = protocol::partition_files(&files_to_transfer, num_streams);
@@ -368,6 +606,24 @@ pub fn run_sender(
             format!("Transfer failed with errors: {:?}", thread_errors),
         ));
     }
+
+    let elapsed = transfer_start.elapsed();
+    let avg_speed_mb = if elapsed.as_secs_f64() > 0.0 {
+        (total_bytes_to_transfer as f64 / 1_048_576.0) / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!("\n================ [ TRANSFER SUMMARY ] ================");
+    println!("📂 Files Scanned: {}", files.len());
+    println!("⏭️ Files Skipped: {}", files.len() - files_to_transfer.len());
+    println!("📥 Files Transferred: {}", files_to_transfer.len());
+    println!("📊 Total Data Transferred: {:.2} MB", total_bytes_to_transfer as f64 / 1_048_576.0);
+    println!("⏱️ Time Elapsed: {:?}", elapsed);
+    println!("⚡ Average Speed: {:.2} MB/s", avg_speed_mb);
+    println!("🗜️ LZ4 Compression: {}", if use_compression { "ON" } else { "OFF" });
+    println!("🧵 Parallel Streams: {}", num_streams);
+    println!("======================================================\n");
 
     println!("🎉 All streams completed successfully!");
     Ok(())
