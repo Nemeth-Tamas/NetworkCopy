@@ -46,7 +46,12 @@ pub fn run_benchmark_client(
         raw_socket.flush()?;
 
         let socket = if use_encryption {
-            MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, (stream_idx as u32) + 1))
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                raw_socket,
+                session_key,
+                (stream_idx as u32) + 1,
+                ((stream_idx as u32) + 1) | 0x8000_0000,
+            ))
         } else {
             MaybeEncryptedStream::Raw(raw_socket)
         };
@@ -143,7 +148,12 @@ pub fn run_speedtest_benchmark_server(
         let stream_idx = u32::from_be_bytes(idx_bytes) as usize;
 
         let socket = if use_encryption {
-            MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, (stream_idx as u32) + 1))
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                raw_socket,
+                session_key,
+                ((stream_idx as u32) + 1) | 0x8000_0000,
+                (stream_idx as u32) + 1,
+            ))
         } else {
             MaybeEncryptedStream::Raw(raw_socket)
         };

@@ -275,7 +275,8 @@ pub fn run_speedtest_client(
                 MaybeEncryptedStream::Encrypted(EncryptedStream::new(
                     raw_socket,
                     session_key,
-                    speedtest_idx,
+                    stream_idx as u32,
+                    (stream_idx as u32) | 0x8000_0000,
                 ))
             } else {
                 MaybeEncryptedStream::Raw(raw_socket)
@@ -498,7 +499,7 @@ pub fn run_sender(
 
     use crate::encrypted_stream::{EncryptedStream, MaybeEncryptedStream};
     let mut control_stream = if options.encrypt {
-        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0))
+        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0, 0x8000_0000))
     } else {
         MaybeEncryptedStream::Raw(raw_stream)
     };
@@ -709,6 +710,7 @@ pub fn run_sender(
                     raw_data_stream,
                     s_key,
                     (stream_idx as u32) + 1,
+                    ((stream_idx as u32) + 1) | 0x8000_0000,
                 ))
             } else {
                 MaybeEncryptedStream::Raw(raw_data_stream)
@@ -872,7 +874,7 @@ pub fn run_benchmark_sender(
 
     use crate::encrypted_stream::{EncryptedStream, MaybeEncryptedStream};
     let mut control_stream = if options.encrypt {
-        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0))
+        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0, 0x8000_0000))
     } else {
         MaybeEncryptedStream::Raw(raw_stream)
     };

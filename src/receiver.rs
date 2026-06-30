@@ -61,7 +61,12 @@ pub fn run_speedtest_server(
             }
 
             let socket = if use_encryption {
-                MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, idx))
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                    raw_socket,
+                    session_key,
+                    idx,
+                    idx & 0x7FFF_FFFF,
+                ))
             } else {
                 MaybeEncryptedStream::Raw(raw_socket)
             };
@@ -293,7 +298,7 @@ pub fn run_receiver(
 
         use crate::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
         let mut control_stream = if options.encrypt {
-            MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0))
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0x8000_0000, 0))
         } else {
             MaybeEncryptedStream::Raw(control_stream)
         };
@@ -613,7 +618,12 @@ pub fn run_receiver(
             let s_key = session_key;
 
             let socket = if use_encryption {
-                MaybeEncryptedStream::Encrypted(EncryptedStream::new(socket, s_key, (stream_idx as u32) + 1))
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                    socket,
+                    s_key,
+                    ((stream_idx as u32) + 1) | 0x8000_0000,
+                    (stream_idx as u32) + 1,
+                ))
             } else {
                 MaybeEncryptedStream::Raw(socket)
             };
@@ -759,10 +769,7 @@ pub fn run_receiver(
         println!("\n🔄 Loop mode: waiting for next transfer...");
         if is_interactive {
             println!("📂 Opening folder dialog for the next destination...");
-            if let Some(new_dst) = rfd::FileDialog::new()
-                .set_title("Select Destination Folder for Next Transfer")
-                .pick_folder()
-            {
+            if let Some(new_dst) = pick_folder_wizard("Select Destination Folder for Next Transfer", false) {
                 println!("Selected Next Destination: {:?}", new_dst);
                 dst_dir = new_dst;
             } else {
@@ -774,4 +781,56 @@ pub fn run_receiver(
 
     stop_broadcaster.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+pub fn is_gui_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+pub fn pick_folder_wizard(title: &str, require_exists: bool) -> Option<PathBuf> {
+    if is_gui_available() {
+        if let Some(path) = rfd::FileDialog::new().set_title(title).pick_folder() {
+            return Some(path);
+        }
+    }
+    
+    // Fallback to TUI input
+    loop {
+        println!("\n📂 Please enter the directory path for: {}", title);
+        let path_str: String = match dialoguer::Input::new()
+            .with_prompt("Path")
+            .interact_text()
+        {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let p = PathBuf::from(path_str.trim());
+        if require_exists {
+            if p.exists() && p.is_dir() {
+                return Some(p);
+            } else {
+                println!("❌ The path does not exist or is not a directory. Please try again.");
+            }
+        } else {
+            if !p.exists() {
+                match std::fs::create_dir_all(&p) {
+                    Ok(_) => return Some(p),
+                    Err(e) => {
+                        println!("❌ Failed to create directory: {}. Please try again.", e);
+                    }
+                }
+            } else if p.is_dir() {
+                return Some(p);
+            } else {
+                println!("❌ The path exists but is not a directory. Please try again.");
+            }
+        }
+    }
 }

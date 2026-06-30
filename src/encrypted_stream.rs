@@ -4,7 +4,8 @@ use std::io::{Read, Write};
 pub struct EncryptedStream<S: Read + Write> {
     inner: S,
     cipher: ChaCha20Poly1305,
-    stream_idx: u32,
+    write_stream_idx: u32,
+    read_stream_idx: u32,
     write_frame_counter: u64,
     read_frame_counter: u64,
     read_buffer: Vec<u8>,
@@ -12,12 +13,13 @@ pub struct EncryptedStream<S: Read + Write> {
 }
 
 impl<S: Read + Write> EncryptedStream<S> {
-    pub fn new(inner: S, key: [u8; 32], stream_idx: u32) -> Self {
+    pub fn new(inner: S, key: [u8; 32], write_stream_idx: u32, read_stream_idx: u32) -> Self {
         let cipher = ChaCha20Poly1305::new_from_slice(&key).unwrap();
         Self {
             inner,
             cipher,
-            stream_idx,
+            write_stream_idx,
+            read_stream_idx,
             write_frame_counter: 0,
             read_frame_counter: 0,
             read_buffer: Vec::new(),
@@ -65,7 +67,7 @@ impl<S: Read + Write> Read for EncryptedStream<S> {
 
         // Derive decrypt nonce
         let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[..4].copy_from_slice(&self.stream_idx.to_be_bytes());
+        nonce_bytes[..4].copy_from_slice(&self.read_stream_idx.to_be_bytes());
         nonce_bytes[4..].copy_from_slice(&self.read_frame_counter.to_be_bytes());
         self.read_frame_counter += 1;
         
@@ -100,7 +102,7 @@ impl<S: Read + Write> Write for EncryptedStream<S> {
 
         // Derive encrypt nonce
         let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[..4].copy_from_slice(&self.stream_idx.to_be_bytes());
+        nonce_bytes[..4].copy_from_slice(&self.write_stream_idx.to_be_bytes());
         nonce_bytes[4..].copy_from_slice(&self.write_frame_counter.to_be_bytes());
         self.write_frame_counter += 1;
         

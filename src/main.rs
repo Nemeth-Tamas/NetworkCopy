@@ -387,7 +387,7 @@ fn main() {
 
                     use networkcopy::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
                     let mut control_stream = if options.encrypt {
-                        MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0))
+                        MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0x8000_0000, 0))
                     } else {
                         MaybeEncryptedStream::Raw(control_stream)
                     };
@@ -453,56 +453,8 @@ fn main() {
     }
 }
 
-fn is_gui_available() -> bool {
-    #[cfg(unix)]
-    {
-        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 fn pick_folder_wizard(title: &str, require_exists: bool) -> Option<PathBuf> {
-    if is_gui_available() {
-        if let Some(path) = rfd::FileDialog::new().set_title(title).pick_folder() {
-            return Some(path);
-        }
-    }
-    
-    // Fallback to TUI input
-    loop {
-        println!("\n📂 Please enter the directory path for: {}", title);
-        let path_str: String = match dialoguer::Input::new()
-            .with_prompt("Path")
-            .interact_text()
-        {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-        let p = PathBuf::from(path_str.trim());
-        if require_exists {
-            if p.exists() && p.is_dir() {
-                return Some(p);
-            } else {
-                println!("❌ The path does not exist or is not a directory. Please try again.");
-            }
-        } else {
-            if !p.exists() {
-                match std::fs::create_dir_all(&p) {
-                    Ok(_) => return Some(p),
-                    Err(e) => {
-                        println!("❌ Failed to create directory: {}. Please try again.", e);
-                    }
-                }
-            } else if p.is_dir() {
-                return Some(p);
-            } else {
-                println!("❌ The path exists but is not a directory. Please try again.");
-            }
-        }
-    }
+    receiver::pick_folder_wizard(title, require_exists)
 }
 
 fn run_interactive_wizard() {
