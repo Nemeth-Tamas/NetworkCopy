@@ -63,6 +63,22 @@ pub fn scan_directory(
                 }
             };
             let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ Warning: Skipping entry {:?} (File type error: {})",
+                        path, e
+                    );
+                    continue;
+                }
+            };
+
+            if file_type.is_symlink() {
+                // Skip symbolic links by default to avoid copy loops/out-of-tree accesses
+                continue;
+            }
+
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(e) => {
@@ -434,7 +450,7 @@ pub fn run_sender(
         &src_dir,
         &options.includes,
         &options.excludes,
-        options.verify_existing,
+        true, // Always calculate CRC32 to allow full file integrity checks on receiver
     )?;
     let scan_duration = scan_start.elapsed();
 
@@ -530,7 +546,9 @@ pub fn run_sender(
     control_stream.read_exact(&mut pairing_required_byte)?;
     let pairing_required = pairing_required_byte[0] == 1;
 
+    let mut pairing_used = false;
     if pairing_required {
+        pairing_used = true;
         let code = if let Some(c) = &options.pairing_code {
             c.clone()
         } else if options.auto_accept {
@@ -786,6 +804,18 @@ pub fn run_sender(
     );
     println!("⏱️ Time Elapsed: {:?}", elapsed);
     println!("⚡ Average Speed: {:.2} MB/s", avg_speed_mb);
+    println!(
+        "🔒 Authentication: {}",
+        if options.auth_key.is_some() { "ON" } else { "OFF" }
+    );
+    println!(
+        "🔒 Encryption: {}",
+        if options.encrypt { "ON" } else { "OFF" }
+    );
+    println!(
+        "🔑 Pairing Used: {}",
+        if pairing_used { "YES" } else { "NO" }
+    );
     println!(
         "🗜️ LZ4 Compression: {}",
         if use_compression { "ON" } else { "OFF" }

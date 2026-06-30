@@ -131,18 +131,15 @@ fn get_hostname() -> String {
 }
 
 pub fn generate_challenge() -> [u8; 32] {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let val = COUNTER.fetch_add(1, Ordering::SeqCst);
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(&val.to_be_bytes());
-    hasher.update(&std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos().to_be_bytes());
-    hasher.finalize().into()
+    use rand::{RngCore, rngs::OsRng};
+    let mut challenge = [0u8; 32];
+    OsRng.fill_bytes(&mut challenge);
+    challenge
 }
 
 pub fn generate_pairing_code() -> String {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let code = (nanos % 9000) + 1000;
+    use rand::{Rng, rngs::OsRng};
+    let code = OsRng.gen_range(1000..=9999);
     code.to_string()
 }
 
@@ -208,7 +205,18 @@ pub fn run_receiver(
     let port = listen_addr.split(':').last().and_then(|p| p.parse::<u16>().ok()).unwrap_or(7878);
     start_udp_broadcaster(port, options.discovery_port, options.auth_key.clone(), stop_broadcaster_clone)?;
 
-    println!("👂 Listening for connection on {}...", listen_addr);
+    let hostname = get_hostname();
+    println!("\n=========================================");
+    println!(" 🖥️  Receiver Hostname : {}", hostname);
+    println!(" 🔌 Listening Address : {}", listen_addr);
+    println!(" 📡 UDP Discovery     : Broadcasting on port {}", options.discovery_port);
+    println!(" 🔒 Authentication    : {}", if options.auth_key.is_some() { "ON" } else { "OFF" });
+    println!(" 🔒 Encryption        : {}", if options.encrypt { "ON" } else { "OFF" });
+    println!(" 🔑 Pairing Code Mode : {}", if options.auth_key.is_some() { "OFF (Auth key used)" } else { "ON (Dynamic code will display on connect)" });
+    println!(" 🔁 Loop Mode         : {}", if options.loop_mode { "ON (Persistent)" } else { "OFF (Single-shot)" });
+    println!("=========================================\n");
+
+    println!("👂 Listening for connection...");
     let listener = TcpListener::bind(listen_addr)?;
 
     loop {
@@ -663,6 +671,41 @@ pub fn run_receiver(
                             std::io::ErrorKind::InvalidData,
                             format!("CRC32 checksum mismatch for file: {:?}", file_entry.rel_path),
                         ));
+                    }
+
+                    // If it was a resumed transfer, verify the complete merged file's CRC32
+                    if file_entry.offset > 0 {
+                        let full_file_ok = {
+                            let mut full_file = match File::open(&tmp_path) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    return Err(e);
+                                }
+                            };
+                            let mut full_hasher = crc32fast::Hasher::new();
+                            let mut read_buf = [0u8; 64 * 1024];
+                            let mut ok = true;
+                            loop {
+                                match full_file.read(&mut read_buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => full_hasher.update(&read_buf[..n]),
+                                    Err(_) => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            ok && (full_hasher.finalize() == file_entry.crc32)
+                        };
+
+                        if !full_file_ok {
+                            let _ = std::fs::remove_file(&tmp_path);
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Full file CRC32 verification failed for resumed file: {:?}", file_entry.rel_path),
+                            ));
+                        }
                     }
 
                     // Rename temp file to target path

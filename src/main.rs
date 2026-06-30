@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "networkcopy", version = "2.1.0", about = "Fast P2P Parallel File Copy Tool")]
+#[command(name = "networkcopy", version = "2.2.0", about = "Fast P2P Parallel File Copy Tool")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -448,114 +448,403 @@ fn main() {
             }
         }
         None => {
-            // Interactive mode fallback
-            println!("========================================");
-            println!("🚀 NetworkCopy: Fast P2P Parallel File Copy Tool");
-            println!("========================================");
-            println!("Select running mode:");
-            println!("1. Sender (Upload files from this machine)");
-            println!("2. Receiver (Download files to this machine)");
-            print!("> ");
-            io::stdout().flush().unwrap();
+            run_interactive_wizard();
+        }
+    }
+}
 
-            let mut choice = String::new();
-            io::stdin().read_line(&mut choice).unwrap();
-            let choice = choice.trim();
+fn is_gui_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 
-            match choice {
-                "1" => {
-                    println!("\n📂 Opening folder dialog to select source directory...");
-                    if let Some(src_path) = rfd::FileDialog::new()
-                        .set_title("Select Source Folder to Send")
-                        .pick_folder()
-                    {
-                        println!("Selected Source: {:?}", src_path);
-
-                        let mut receiver_ip = String::new();
-                        let mut discovered = false;
-
-                        if let Ok(Some(addr)) = sender::discover_receiver(7879, None) {
-                            println!("✨ Auto-discovered Receiver at {}!", addr);
-                            print!("Connect to this Receiver? (Y/n): ");
-                            io::stdout().flush().unwrap();
-                            let mut ans = String::new();
-                            io::stdin().read_line(&mut ans).unwrap();
-                            let ans = ans.trim().to_lowercase();
-                            if ans.is_empty() || ans.starts_with('y') {
-                                receiver_ip = addr.split(':').next().unwrap_or("127.0.0.1").to_string();
-                                discovered = true;
-                            }
-                        }
-
-                        if !discovered {
-                            print!("\nEnter Receiver IP address (default: 127.0.0.1): ");
-                            io::stdout().flush().unwrap();
-                            let mut ip = String::new();
-                            io::stdin().read_line(&mut ip).unwrap();
-                            let ip_trimmed = ip.trim();
-                            receiver_ip = if ip_trimmed.is_empty() {
-                                "127.0.0.1".to_string()
-                            } else {
-                                ip_trimmed.to_string()
-                            };
-                        }
-
-                        print!("Enter number of parallel streams (0 for auto-tuning speedtest, default: 0): ");
-                        io::stdout().flush().unwrap();
-                        let mut streams_str = String::new();
-                        io::stdin().read_line(&mut streams_str).unwrap();
-                        let num_streams = streams_str.trim().parse::<usize>().unwrap_or(0);
-
-                        print!("Enable LZ4 Compression? (y/N): ");
-                        io::stdout().flush().unwrap();
-                        let mut comp_str = String::new();
-                        io::stdin().read_line(&mut comp_str).unwrap();
-                        let use_compression = comp_str.trim().to_lowercase().starts_with('y');
-
-                        let receiver_addr = format!("{}:7878", receiver_ip);
-                        let options = SenderOptions {
-                            control_port: 7878,
-                            discovery_port: 7879,
-                            ..Default::default()
-                        };
-
-                        println!(
-                            "\nStarting transfer to {} (streams: {}, compression: {})...",
-                            receiver_addr, num_streams, use_compression
-                        );
-                        if let Err(e) = sender::run_sender(src_path, &receiver_addr, num_streams, use_compression, options) {
-                            eprintln!("❌ Sender Error: {}", e);
-                        }
-                    } else {
-                        println!("❌ Folder selection cancelled.");
+fn pick_folder_wizard(title: &str, require_exists: bool) -> Option<PathBuf> {
+    if is_gui_available() {
+        if let Some(path) = rfd::FileDialog::new().set_title(title).pick_folder() {
+            return Some(path);
+        }
+    }
+    
+    // Fallback to TUI input
+    loop {
+        println!("\n📂 Please enter the directory path for: {}", title);
+        let path_str: String = match dialoguer::Input::new()
+            .with_prompt("Path")
+            .interact_text()
+        {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        let p = PathBuf::from(path_str.trim());
+        if require_exists {
+            if p.exists() && p.is_dir() {
+                return Some(p);
+            } else {
+                println!("❌ The path does not exist or is not a directory. Please try again.");
+            }
+        } else {
+            if !p.exists() {
+                match std::fs::create_dir_all(&p) {
+                    Ok(_) => return Some(p),
+                    Err(e) => {
+                        println!("❌ Failed to create directory: {}. Please try again.", e);
                     }
                 }
-                "2" => {
-                    println!("\n📂 Opening folder dialog to select destination directory...");
-                    if let Some(dst_path) = rfd::FileDialog::new()
-                        .set_title("Select Destination Folder to Save")
-                        .pick_folder()
-                    {
-                        println!("Selected Destination: {:?}", dst_path);
-                        println!("\nStarting receiver. Listening on port 7878...");
-                        
-                        let options = ReceiverOptions {
-                            control_port: 7878,
-                            discovery_port: 7879,
-                            ..Default::default()
-                        };
+            } else if p.is_dir() {
+                return Some(p);
+            } else {
+                println!("❌ The path exists but is not a directory. Please try again.");
+            }
+        }
+    }
+}
 
-                        if let Err(e) = receiver::run_receiver(dst_path, "0.0.0.0:7878", true, options) {
-                            eprintln!("❌ Receiver Error: {}", e);
-                        }
-                    } else {
-                        println!("❌ Folder selection cancelled.");
-                    }
-                }
-                _ => {
-                    println!("❌ Invalid choice. Exiting.");
+fn run_interactive_wizard() {
+    println!("========================================");
+    println!("🚀 NetworkCopy: Fast P2P Parallel File Copy Tool");
+    println!("========================================");
+    
+    let selections = &["1. Sender (Upload files from this machine)", "2. Receiver (Download files to this machine)", "3. Exit"];
+    let choice = dialoguer::Select::new()
+        .with_prompt("Select Running Mode")
+        .items(&selections[..])
+        .default(0)
+        .interact()
+        .unwrap_or(2);
+        
+    match choice {
+        0 => run_sender_wizard(),
+        1 => run_receiver_wizard(),
+        _ => {
+            println!("Exiting.");
+        }
+    }
+}
+
+fn run_sender_wizard() {
+    let src_dir = match pick_folder_wizard("Select Source Folder to Send", true) {
+        Some(d) => d,
+        None => {
+            println!("❌ No source folder selected. Aborting.");
+            return;
+        }
+    };
+    
+    // Discovery or manual IP
+    println!("\n🔍 Finding Receiver on the network...");
+    let mut discovered_addr = None;
+    
+    let use_auth_discovery = dialoguer::Confirm::new()
+        .with_prompt("Do you want to use a pre-shared Auth Key for auto-discovery?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    let mut discovery_auth_key = None;
+    if use_auth_discovery {
+        let key: String = dialoguer::Password::new()
+            .with_prompt("Enter pre-shared Auth Key")
+            .interact()
+            .unwrap_or_default();
+        if !key.is_empty() {
+            discovery_auth_key = Some(key);
+        }
+    }
+    
+    if let Ok(Some(addr)) = sender::discover_receiver(7879, discovery_auth_key.clone()) {
+        println!("✨ Auto-discovered Receiver at {}!", addr);
+        let connect = dialoguer::Confirm::new()
+            .with_prompt("Connect to this auto-discovered Receiver?")
+            .default(true)
+            .interact()
+            .unwrap_or(false);
+        if connect {
+            discovered_addr = Some(addr);
+        }
+    }
+    
+    let receiver_addr = if let Some(addr) = discovered_addr {
+        addr
+    } else {
+        println!("\nEnter Receiver IP address or hostname:");
+        let ip: String = dialoguer::Input::new()
+            .with_prompt("Receiver IP/Hostname")
+            .default("127.0.0.1".to_string())
+            .interact_text()
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+            
+        let port: u16 = dialoguer::Input::new()
+            .with_prompt("Receiver Port")
+            .default(7878)
+            .interact()
+            .unwrap_or(7878);
+            
+        format!("{}:{}", ip.trim(), port)
+    };
+    
+    // Compression
+    let comp_selections = &["Auto (suggest compression if CPU headroom exists)", "ON (Force LZ4 Compression)", "OFF (Raw Speed)"];
+    let comp_choice = dialoguer::Select::new()
+        .with_prompt("LZ4 Compression Mode")
+        .items(&comp_selections[..])
+        .default(2) // Default to OFF for maximum speed
+        .interact()
+        .unwrap_or(2);
+    let use_compression = comp_choice == 1; // ON
+    
+    // Streams count
+    let stream_selections = &["Auto-tune (Run speedtest to find optimal streams)", "1 Stream", "2 Streams", "4 Streams", "8 Streams", "Custom count"];
+    let stream_choice = dialoguer::Select::new()
+        .with_prompt("Parallel Stream Count")
+        .items(&stream_selections[..])
+        .default(0)
+        .interact()
+        .unwrap_or(0);
+        
+    let streams = match stream_choice {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        _ => {
+            dialoguer::Input::<usize>::new()
+                .with_prompt("Enter stream count (1-32)")
+                .default(8)
+                .interact()
+                .unwrap_or(8)
+        }
+    };
+    
+    // Security & Encryption
+    let sec_selections = &["Unsecure / Default (Max Speed on trusted LAN)", "HMAC-SHA256 Authenticated", "Full ChaCha20-Poly1305 Encrypted (implies Auth & Pairing)"];
+    let sec_choice = dialoguer::Select::new()
+        .with_prompt("Security Profile")
+        .items(&sec_selections[..])
+        .default(0)
+        .interact()
+        .unwrap_or(0);
+        
+    let mut auth_key = discovery_auth_key;
+    let mut encrypt = false;
+    
+    match sec_choice {
+        1 => {
+            if auth_key.is_none() {
+                let key: String = dialoguer::Password::new()
+                    .with_prompt("Enter Auth Key / Passphrase")
+                    .interact()
+                    .unwrap_or_default();
+                if !key.is_empty() {
+                    auth_key = Some(key);
                 }
             }
         }
+        2 => {
+            encrypt = true;
+            println!("⚠️ Note: Encryption requires an Authentication Key.");
+            if auth_key.is_none() {
+                let key: String = dialoguer::Password::new()
+                    .with_prompt("Enter Auth Key / Passphrase")
+                    .interact()
+                    .unwrap_or_default();
+                if !key.is_empty() {
+                    auth_key = Some(key);
+                } else {
+                    println!("❌ Encryption cannot be enabled without a passphrase. Aborting.");
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+    
+    // Exclude / Include glob filters
+    let set_filters = dialoguer::Confirm::new()
+        .with_prompt("Do you want to configure Include/Exclude glob filters?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    let mut include = Vec::new();
+    let mut exclude = Vec::new();
+    if set_filters {
+        let inc_str: String = dialoguer::Input::new()
+            .with_prompt("Include glob pattern (comma-separated, e.g. *.rs,*.txt, default: all)")
+            .default("".to_string())
+            .interact_text()
+            .unwrap_or_default();
+        if !inc_str.trim().is_empty() {
+            include = inc_str.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        
+        let exc_str: String = dialoguer::Input::new()
+            .with_prompt("Exclude glob pattern (comma-separated, e.g. target/*,node_modules/*, default: none)")
+            .default("".to_string())
+            .interact_text()
+            .unwrap_or_default();
+        if !exc_str.trim().is_empty() {
+            exclude = exc_str.split(',').map(|s| s.trim().to_string()).collect();
+        }
+    }
+    
+    // Verify existing files
+    let verify_existing = dialoguer::Confirm::new()
+        .with_prompt("Force CRC32 verification for skipped files (smart resume check)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    // Dry run
+    let dry_run = dialoguer::Confirm::new()
+        .with_prompt("Run as a Dry Run first (shows estimation only)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    let options = SenderOptions {
+        includes: include,
+        excludes: exclude,
+        verify_existing,
+        dry_run,
+        no_discovery: false,
+        auth_key: auth_key.clone(),
+        control_port: 7878,
+        discovery_port: 7879,
+        auto_accept: false,
+        pairing_code: None,
+        encrypt,
+    };
+    
+    println!("\n========================================");
+    println!("🚀 Ready to start Sender session!");
+    println!("📂 Source: {:?}", src_dir);
+    println!("🔌 Target: {}", receiver_addr);
+    println!("🔒 Authentication: {}", if auth_key.is_some() { "ON" } else { "OFF" });
+    println!("🔒 Encryption: {}", if encrypt { "ON" } else { "OFF" });
+    println!("🗜️ LZ4 Compression: {}", if use_compression { "ON" } else { "OFF" });
+    println!("🧵 Parallel Streams: {}", if streams == 0 { "Auto-tune".to_string() } else { streams.to_string() });
+    println!("========================================\n");
+    
+    let proceed = dialoguer::Confirm::new()
+        .with_prompt("Start file transfer?")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+        
+    if proceed {
+        if let Err(e) = sender::run_sender(src_dir, &receiver_addr, streams, use_compression, options) {
+            eprintln!("❌ Sender Error: {}", e);
+        }
+    } else {
+        println!("Cancelled.");
+    }
+}
+
+fn run_receiver_wizard() {
+    let dst_dir = match pick_folder_wizard("Select Destination Folder for Downloads", false) {
+        Some(d) => d,
+        None => {
+            println!("❌ No destination folder selected. Aborting.");
+            return;
+        }
+    };
+    
+    let port: u16 = dialoguer::Input::new()
+        .with_prompt("Bind TCP Port")
+        .default(7878)
+        .interact()
+        .unwrap_or(7878);
+        
+    let bind_ip: String = dialoguer::Input::new()
+        .with_prompt("Bind IP Address")
+        .default("0.0.0.0".to_string())
+        .interact_text()
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+        
+    let discovery_port: u16 = dialoguer::Input::new()
+        .with_prompt("UDP Discovery Port")
+        .default(7879)
+        .interact()
+        .unwrap_or(7879);
+        
+    let loop_mode = dialoguer::Confirm::new()
+        .with_prompt("Enable Loop Mode (stay active after a transfer completes)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    let sec_selections = &["Unsecure / Default (Max Speed on trusted LAN)", "HMAC-SHA256 Authenticated", "Full ChaCha20-Poly1305 Encrypted (implies Auth)"];
+    let sec_choice = dialoguer::Select::new()
+        .with_prompt("Security Profile")
+        .items(&sec_selections[..])
+        .default(0)
+        .interact()
+        .unwrap_or(0);
+        
+    let mut auth_key = None;
+    let mut encrypt = false;
+    
+    match sec_choice {
+        1 => {
+            let key: String = dialoguer::Password::new()
+                .with_prompt("Enter Auth Key / Passphrase")
+                .interact()
+                .unwrap_or_default();
+            if !key.is_empty() {
+                auth_key = Some(key);
+            }
+        }
+        2 => {
+            encrypt = true;
+            println!("⚠️ Note: Encryption requires an Authentication Key.");
+            let key: String = dialoguer::Password::new()
+                .with_prompt("Enter Auth Key / Passphrase")
+                .interact()
+                .unwrap_or_default();
+            if !key.is_empty() {
+                auth_key = Some(key);
+            } else {
+                println!("❌ Encryption cannot be enabled without a passphrase. Aborting.");
+                return;
+            }
+        }
+        _ => {}
+    }
+    
+    let verify_existing = dialoguer::Confirm::new()
+        .with_prompt("Force CRC32 verification for skipped files (smart resume check)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+        
+    let listen_addr = format!("{}:{}", bind_ip.trim(), port);
+    let options = ReceiverOptions {
+        verify_existing,
+        loop_mode,
+        auth_key: auth_key.clone(),
+        control_port: port,
+        discovery_port,
+        pairing_code: None,
+        encrypt,
+    };
+    
+    println!("\n========================================");
+    println!("🚀 Ready to start Receiver listener!");
+    println!("📂 Destination: {:?}", dst_dir);
+    println!("🔌 Listening Address: {}", listen_addr);
+    println!("🔒 Authentication: {}", if auth_key.is_some() { "ON" } else { "OFF" });
+    println!("🔒 Encryption: {}", if encrypt { "ON" } else { "OFF" });
+    println!("⚙️ Loop Mode: {}", if loop_mode { "ON" } else { "OFF" });
+    println!("========================================\n");
+    
+    if let Err(e) = receiver::run_receiver(dst_dir, &listen_addr, true, options) {
+        eprintln!("❌ Receiver Error: {}", e);
     }
 }

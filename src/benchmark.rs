@@ -37,8 +37,10 @@ pub fn run_benchmark_client(
     let mut sockets = Vec::with_capacity(num_streams);
 
     // Pre-connect all streams
+    let mut raw_sockets = Vec::with_capacity(num_streams);
     for stream_idx in 0..num_streams {
         let mut raw_socket = TcpStream::connect(receiver_addr)?;
+        raw_sockets.push(raw_socket.try_clone()?);
         raw_socket.write_all(b"FSTB")?;
         raw_socket.write_all(&(stream_idx as u32).to_be_bytes())?;
         raw_socket.flush()?;
@@ -82,6 +84,11 @@ pub fn run_benchmark_client(
 
     stop_signal.store(true, Ordering::Relaxed);
 
+    // Explicitly shut down all raw sockets to unblock the flood threads instantly
+    for raw_socket in raw_sockets {
+        let _ = raw_socket.shutdown(std::net::Shutdown::Both);
+    }
+
     for handle in handles {
         let _ = handle.join();
     }
@@ -118,9 +125,11 @@ pub fn run_speedtest_benchmark_server(
     control_stream.flush()?;
 
     println!("⚡ Preparing benchmark receiver for {} streams...", k);
+    let mut raw_sockets = Vec::with_capacity(k);
     let mut sockets = Vec::with_capacity(k);
     for _ in 0..k {
         let (mut raw_socket, _) = listener.accept()?;
+        raw_sockets.push(raw_socket.try_clone()?);
         let mut magic = [0u8; 4];
         raw_socket.read_exact(&mut magic)?;
         if &magic != b"FSTB" {
@@ -172,6 +181,11 @@ pub fn run_speedtest_benchmark_server(
         last_bytes = total;
         let speed = diff as f64 / 1_048_576.0;
         println!("📥 [Server] Sec {:2}: {:.2} MB/s (Received: {:.2} MB)", sec, speed, total as f64 / 1_048_576.0);
+    }
+
+    // Explicitly shut down all accepted sockets to unblock the discard threads
+    for raw_socket in raw_sockets {
+        let _ = raw_socket.shutdown(std::net::Shutdown::Both);
     }
 
     // Join threads

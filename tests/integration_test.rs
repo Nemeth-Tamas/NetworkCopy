@@ -757,3 +757,132 @@ fn test_encrypted_benchmark_execution() {
 
     let _ = receiver_handle.join().unwrap();
 }
+
+#[test]
+fn test_symlink_skipping() {
+    let test_root = Path::new("target/test_symlink_env");
+    let src_dir = test_root.join("src");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    
+    let file_path = src_dir.join("real.txt");
+    fs::write(&file_path, b"real file content").unwrap();
+    
+    let link_path = src_dir.join("link.txt");
+    
+    // Create symlink depending on target OS
+    let symlink_created = {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file_path, &link_path).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(&file_path, &link_path).is_ok()
+        }
+    };
+    
+    let files = sender::scan_directory(&src_dir, &[], &[], false).unwrap();
+    let file_names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
+    
+    // "real.txt" must be present.
+    assert!(file_names.contains(&"real.txt".to_string()));
+    
+    // If symlink was successfully created, it must NOT be in the scanned list!
+    if symlink_created {
+        assert!(!file_names.contains(&"link.txt".to_string()));
+    }
+    
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+fn test_cross_platform_path_handling() {
+    let test_root = Path::new("target/test_cross_platform_paths");
+    let src_dir = test_root.join("src");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+
+    // Create deep directories, files with spaces, and Unicode file names
+    let deep_dir = src_dir.join("deep").join("folder name with spaces").join("nested");
+    fs::create_dir_all(&deep_dir).unwrap();
+    
+    let file_unicode = deep_dir.join("üñîçøðé.txt");
+    fs::write(&file_unicode, b"unicode content").unwrap();
+
+    let files = sender::scan_directory(&src_dir, &[], &[], false).unwrap();
+    let file_names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
+
+    // Verify spaces and Unicode paths are scanned correctly and backslashes normalized to forward slashes
+    assert_eq!(files.len(), 1);
+    assert_eq!(file_names[0], "deep/folder name with spaces/nested/üñîçøðé.txt");
+
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+fn test_full_file_resume_integrity() {
+    let test_root = Path::new("target/test_resume_integrity_env");
+    let src_dir = test_root.join("src");
+    let dst_dir = test_root.join("dst");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // 1. Create a 10KB random source file
+    let file_size = 10 * 1024;
+    let mut file_content = vec![0u8; file_size];
+    for (i, byte) in file_content.iter_mut().enumerate() {
+        *byte = (i % 256) as u8;
+    }
+    let src_file_path = src_dir.join("file.txt");
+    fs::write(&src_file_path, &file_content).unwrap();
+
+    // 2. Pre-create a partial 4KB temp file in dst with CORRUPTED prefix (first 2KB different)
+    let partial_size = 4 * 1024;
+    let mut corrupted_partial = file_content[..partial_size].to_vec();
+    for i in 0..2048 {
+        corrupted_partial[i] = corrupted_partial[i].wrapping_add(1);
+    }
+    let dst_tmp_path = dst_dir.join("file.txt.networkcopy-tmp");
+    fs::write(&dst_tmp_path, &corrupted_partial).unwrap();
+
+    // 3. Start receiver and sender
+    let dst_clone = dst_dir.clone();
+    let receiver_handle = thread::spawn(move || {
+        let options = receiver::ReceiverOptions {
+            control_port: 9965,
+            discovery_port: 9966,
+            ..Default::default()
+        };
+        receiver::run_receiver(dst_clone, "127.0.0.1:9965", false, options)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let options = sender::SenderOptions {
+        control_port: 9965,
+        discovery_port: 9966,
+        auto_accept: true,
+        ..Default::default()
+    };
+    
+    // The transfer completes on sender side, but the receiver must fail verification!
+    let _ = sender::run_sender(src_dir.clone(), "127.0.0.1:9965", 1, false, options);
+    
+    let receiver_res = receiver_handle.join().unwrap();
+    assert!(receiver_res.is_err(), "Receiver must return error on verification failure");
+
+    // 4. Verify that final file was NOT created and corrupted temp file was deleted
+    let dst_file_path = dst_dir.join("file.txt");
+    assert!(!dst_file_path.exists(), "Final file should not exist");
+    assert!(!dst_tmp_path.exists(), "Corrupted temp file should be deleted on verification failure");
+
+    let _ = fs::remove_dir_all(test_root);
+}

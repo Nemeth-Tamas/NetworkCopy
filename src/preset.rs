@@ -50,6 +50,10 @@ pub fn run_preset(preset_path: PathBuf) -> Result<(), Box<dyn std::error::Error 
     let content = std::fs::read_to_string(preset_path)?;
     let config: PresetConfig = serde_json::from_str(&content)?;
 
+    if config.encrypt && config.auth.is_none() {
+        return Err("Encryption requires authentication. Please provide an authentication key via the 'auth' field in the preset.".into());
+    }
+
     match config.role.to_lowercase().as_str() {
         "send" => {
             let mut target_addr = None;
