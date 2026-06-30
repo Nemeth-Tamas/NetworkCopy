@@ -652,12 +652,15 @@ fn test_benchmark_execution() {
             control_stream.read_exact(&mut mode).unwrap();
             let mut version = [0u8; 1];
             control_stream.read_exact(&mut version).unwrap();
+            let mut encrypt = [0u8; 1];
+            control_stream.read_exact(&mut encrypt).unwrap();
             // Auth Handshake (disabled)
             control_stream.write_all(&[0]).unwrap();
             // Pairing Handshake (disabled because we simulate auto-accept)
             control_stream.write_all(&[0]).unwrap();
 
-            let res = networkcopy::benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener);
+            let mut maybe_stream = networkcopy::encrypted_stream::MaybeEncryptedStream::Raw(control_stream);
+            let res = networkcopy::benchmark::run_speedtest_benchmark_server(&mut maybe_stream, &listener, false, [0u8; 32]);
             assert!(res.is_ok(), "Benchmark server should finish successfully");
             break;
         }
@@ -673,6 +676,84 @@ fn test_benchmark_execution() {
     };
     let result = sender::run_benchmark_sender("127.0.0.1:9941", 2, 1, options);
     assert!(result.is_ok(), "Benchmark client should run and complete successfully");
+
+    let _ = receiver_handle.join().unwrap();
+}
+
+#[test]
+fn test_encrypted_file_transfer() {
+    let test_root = Path::new("target/test_encrypted_transfer");
+    let src_dir = test_root.join("src");
+    let dst_dir = test_root.join("dst");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    fs::write(src_dir.join("confidential.txt"), b"highly classified document data").unwrap();
+
+    let dst_clone = dst_dir.clone();
+    let receiver_handle = thread::spawn(move || {
+        let options = receiver::ReceiverOptions {
+            control_port: 9931,
+            discovery_port: 9932,
+            auth_key: Some("secure_passphrase".to_string()),
+            encrypt: true,
+            ..Default::default()
+        };
+        receiver::run_receiver(dst_clone, "127.0.0.1:9931", false, options)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let options = sender::SenderOptions {
+        control_port: 9931,
+        discovery_port: 9932,
+        auth_key: Some("secure_passphrase".to_string()),
+        encrypt: true,
+        auto_accept: true,
+        ..Default::default()
+    };
+    let result = sender::run_sender(src_dir.clone(), "127.0.0.1:9931", 1, false, options);
+    assert!(result.is_ok(), "Encrypted file transfer should succeed");
+    
+    let _ = receiver_handle.join().unwrap();
+
+    // Verify file content is intact
+    let dst_file_path = dst_dir.join("confidential.txt");
+    assert!(dst_file_path.exists());
+    let content = fs::read_to_string(dst_file_path).unwrap();
+    assert_eq!(content, "highly classified document data");
+
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+fn test_encrypted_benchmark_execution() {
+    let receiver_handle = thread::spawn(move || {
+        let options = receiver::ReceiverOptions {
+            control_port: 9921,
+            discovery_port: 9922,
+            auth_key: Some("benchmark_passphrase".to_string()),
+            encrypt: true,
+            ..Default::default()
+        };
+        receiver::run_receiver(Path::new("target").to_path_buf(), "127.0.0.1:9921", false, options)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let options = sender::SenderOptions {
+        control_port: 9921,
+        discovery_port: 9922,
+        auth_key: Some("benchmark_passphrase".to_string()),
+        encrypt: true,
+        auto_accept: true,
+        ..Default::default()
+    };
+    let result = sender::run_benchmark_sender("127.0.0.1:9921", 2, 1, options);
+    assert!(result.is_ok(), "Encrypted benchmark should run successfully");
 
     let _ = receiver_handle.join().unwrap();
 }

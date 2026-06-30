@@ -5,12 +5,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
+
 /// Runs the client-side benchmark by flooding the receiver with dummy data.
 pub fn run_benchmark_client(
     receiver_addr: &str,
     num_streams: usize,
     duration_secs: u32,
-    mut control_stream: TcpStream,
+    mut control_stream: MaybeEncryptedStream<TcpStream>,
+    use_encryption: bool,
+    session_key: [u8; 32],
 ) -> std::io::Result<()> {
     // Send selected stream count (4 bytes) and duration (4 bytes)
     control_stream.write_all(&(num_streams as u32).to_be_bytes())?;
@@ -34,10 +38,16 @@ pub fn run_benchmark_client(
 
     // Pre-connect all streams
     for stream_idx in 0..num_streams {
-        let mut socket = TcpStream::connect(receiver_addr)?;
-        socket.write_all(b"FSTB")?;
-        socket.write_all(&(stream_idx as u32).to_be_bytes())?;
-        socket.flush()?;
+        let mut raw_socket = TcpStream::connect(receiver_addr)?;
+        raw_socket.write_all(b"FSTB")?;
+        raw_socket.write_all(&(stream_idx as u32).to_be_bytes())?;
+        raw_socket.flush()?;
+
+        let socket = if use_encryption {
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, (stream_idx as u32) + 1))
+        } else {
+            MaybeEncryptedStream::Raw(raw_socket)
+        };
         sockets.push(socket);
     }
 
@@ -89,8 +99,10 @@ pub fn run_benchmark_client(
 
 /// Runs the server-side benchmark by reading and discarding incoming data.
 pub fn run_speedtest_benchmark_server(
-    control_stream: &mut TcpStream,
+    control_stream: &mut MaybeEncryptedStream<TcpStream>,
     listener: &TcpListener,
+    use_encryption: bool,
+    session_key: [u8; 32],
 ) -> std::io::Result<()> {
     // Read stream count (4 bytes) and duration (4 bytes)
     let mut stream_count_bytes = [0u8; 4];
@@ -108,9 +120,9 @@ pub fn run_speedtest_benchmark_server(
     println!("⚡ Preparing benchmark receiver for {} streams...", k);
     let mut sockets = Vec::with_capacity(k);
     for _ in 0..k {
-        let (mut socket, _) = listener.accept()?;
+        let (mut raw_socket, _) = listener.accept()?;
         let mut magic = [0u8; 4];
-        socket.read_exact(&mut magic)?;
+        raw_socket.read_exact(&mut magic)?;
         if &magic != b"FSTB" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -118,7 +130,14 @@ pub fn run_speedtest_benchmark_server(
             ));
         }
         let mut idx_bytes = [0u8; 4];
-        socket.read_exact(&mut idx_bytes)?;
+        raw_socket.read_exact(&mut idx_bytes)?;
+        let stream_idx = u32::from_be_bytes(idx_bytes) as usize;
+
+        let socket = if use_encryption {
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, (stream_idx as u32) + 1))
+        } else {
+            MaybeEncryptedStream::Raw(raw_socket)
+        };
         sockets.push(socket);
     }
 

@@ -68,6 +68,10 @@ enum Commands {
         /// UDP discovery port (default: 7879)
         #[arg(long, default_value_t = 7879)]
         discovery_port: u16,
+
+        /// Enable ChaCha20-Poly1305 stream encryption
+        #[arg(long)]
+        encrypt: bool,
     },
     /// Receive files from a sender
     Receive {
@@ -101,6 +105,10 @@ enum Commands {
         /// Bypass interactive prompts (e.g. bypass folder picker in loop mode)
         #[arg(short, long)]
         yes: bool,
+
+        /// Enable ChaCha20-Poly1305 stream encryption
+        #[arg(long)]
+        encrypt: bool,
     },
     /// Run a transfer job defined in a JSON preset file
     Preset {
@@ -132,6 +140,10 @@ enum Commands {
         /// HMAC SHA256 pre-shared secret key for secure benchmarking
         #[arg(long)]
         auth: Option<String>,
+
+        /// Enable ChaCha20-Poly1305 stream encryption
+        #[arg(long)]
+        encrypt: bool,
     },
 }
 
@@ -153,7 +165,12 @@ fn main() {
             include,
             exclude,
             discovery_port,
+            encrypt,
         }) => {
+            if encrypt && auth.is_none() {
+                eprintln!("❌ Error: Encryption requires authentication. Please provide an authentication key via `--auth <key>`.");
+                std::process::exit(1);
+            }
             let mut target_addr = None;
 
             if !no_discovery && ip.is_none() {
@@ -209,6 +226,7 @@ fn main() {
                 discovery_port,
                 auto_accept: yes,
                 pairing_code: None,
+                encrypt,
             };
 
             println!("🚀 Running in CLI Sender mode...");
@@ -229,7 +247,12 @@ fn main() {
             auth,
             discovery_port,
             yes,
+            encrypt,
         }) => {
+            if encrypt && auth.is_none() {
+                eprintln!("❌ Error: Encryption requires authentication. Please provide an authentication key via `--auth <key>`.");
+                std::process::exit(1);
+            }
             let listen_addr = format!("{}:{}", bind, port);
             let options = ReceiverOptions {
                 verify_existing,
@@ -238,6 +261,7 @@ fn main() {
                 control_port: port,
                 discovery_port,
                 pairing_code: None,
+                encrypt,
             };
 
             println!("🚀 Running in CLI Receiver mode...");
@@ -261,14 +285,20 @@ fn main() {
             duration,
             yes,
             auth,
+            encrypt,
         }) => {
             use std::io::Read;
+            if encrypt && auth.is_none() {
+                eprintln!("❌ Error: Encryption requires authentication. Please provide an authentication key via `--auth <key>`.");
+                std::process::exit(1);
+            }
             if let Some(target_ip) = ip {
                 let receiver_addr = format!("{}:{}", target_ip, port);
                 let options = SenderOptions {
                     auth_key: auth,
                     control_port: port,
                     auto_accept: yes,
+                    encrypt,
                     ..Default::default()
                 };
                 println!("🚀 Launching LAN benchmark client against {}...", receiver_addr);
@@ -288,6 +318,7 @@ fn main() {
                 let options = ReceiverOptions {
                     auth_key: auth,
                     control_port: port,
+                    encrypt,
                     ..Default::default()
                 };
 
@@ -325,6 +356,41 @@ fn main() {
                         eprintln!("⚠️ Protocol version mismatch: expected 2, got {}", version[0]);
                         continue;
                     }
+
+                    // Read encrypt flag
+                    let mut encrypt_flag = [0u8; 1];
+                    if control_stream.read_exact(&mut encrypt_flag).is_err() { continue; }
+                    let client_wants_encrypt = encrypt_flag[0] == 1;
+
+                    if client_wants_encrypt != options.encrypt {
+                        eprintln!("⚠️ Encryption settings mismatch: client wants encrypt = {}, server config = {}", client_wants_encrypt, options.encrypt);
+                        continue;
+                    }
+
+                    let mut session_key = [0u8; 32];
+                    if options.encrypt {
+                        let mut sender_nonce = [0u8; 32];
+                        if control_stream.read_exact(&mut sender_nonce).is_err() { continue; }
+
+                        use rand::RngCore;
+                        let mut receiver_nonce = [0u8; 32];
+                        rand::thread_rng().fill_bytes(&mut receiver_nonce);
+                        if control_stream.write_all(&receiver_nonce).is_err() { continue; }
+                        let _ = control_stream.flush();
+
+                        use hmac::Mac;
+                        let mut mac = hmac::SimpleHmac::<sha2::Sha256>::new_from_slice(options.auth_key.as_ref().unwrap().as_bytes()).unwrap();
+                        mac.update(&sender_nonce);
+                        mac.update(&receiver_nonce);
+                        session_key = mac.finalize().into_bytes().into();
+                    }
+
+                    use networkcopy::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
+                    let mut control_stream = if options.encrypt {
+                        MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0))
+                    } else {
+                        MaybeEncryptedStream::Raw(control_stream)
+                    };
 
                     // HMAC Auth Handshake
                     let auth_required = options.auth_key.is_some();
@@ -374,7 +440,7 @@ fn main() {
                         }
                     }
 
-                    if let Err(e) = benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener) {
+                    if let Err(e) = benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener, options.encrypt, session_key) {
                         eprintln!("⚠️ Benchmark session completed with error: {}", e);
                     }
                     break;

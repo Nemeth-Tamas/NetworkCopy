@@ -32,6 +32,8 @@ pub struct PresetConfig {
     pub bind: String,
     #[serde(default)]
     pub loop_mode: bool,
+    #[serde(default)]
+    pub encrypt: bool,
 }
 
 fn default_port() -> u16 {
@@ -76,6 +78,7 @@ pub fn run_preset(preset_path: PathBuf) -> Result<(), Box<dyn std::error::Error 
                 discovery_port: config.discovery_port,
                 auto_accept: config.yes,
                 pairing_code: None,
+                encrypt: config.encrypt,
             };
 
             println!("🚀 Running Preset Job (Sender)...");
@@ -93,6 +96,7 @@ pub fn run_preset(preset_path: PathBuf) -> Result<(), Box<dyn std::error::Error 
                 control_port: config.port,
                 discovery_port: config.discovery_port,
                 pairing_code: None,
+                encrypt: config.encrypt,
             };
 
             println!("🚀 Running Preset Job (Receiver)...");

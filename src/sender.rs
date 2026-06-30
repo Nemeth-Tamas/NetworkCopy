@@ -2,10 +2,11 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use crate::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -23,7 +24,7 @@ fn get_file_permissions(_meta: &std::fs::Metadata) -> u32 {
     0o644
 }
 
-/// Recursively scas a directory in parallel using Rayon.
+/// Recursively scans a directory in parallel using Rayon.
 pub fn scan_directory(
     base_dir: &Path,
     includes: &[String],
@@ -41,7 +42,10 @@ pub fn scan_directory(
         let read_dir = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
             Err(e) => {
-                eprintln!("⚠️ Warning: Skipping directory {:?} (Read error: {})", dir, e);
+                eprintln!(
+                    "⚠️ Warning: Skipping directory {:?} (Read error: {})",
+                    dir, e
+                );
                 return Ok(entries);
             }
         };
@@ -51,7 +55,10 @@ pub fn scan_directory(
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("⚠️ Warning: Skipping directory entry in {:?} (Read error: {})", dir, e);
+                    eprintln!(
+                        "⚠️ Warning: Skipping directory entry in {:?} (Read error: {})",
+                        dir, e
+                    );
                     continue;
                 }
             };
@@ -59,7 +66,10 @@ pub fn scan_directory(
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("⚠️ Warning: Skipping entry metadata {:?} (Metadata error: {})", path, e);
+                    eprintln!(
+                        "⚠️ Warning: Skipping entry metadata {:?} (Metadata error: {})",
+                        path, e
+                    );
                     continue;
                 }
             };
@@ -70,7 +80,7 @@ pub fn scan_directory(
                 if let Ok(rel) = path.strip_prefix(&base_dir) {
                     if let Some(rel_str) = rel.to_str() {
                         let rel_path_normalized = rel_str.replace('\\', "/");
-                        
+
                         // Apply include/exclude glob filters
                         if should_skip(&rel_path_normalized, &includes, &excludes) {
                             continue;
@@ -79,17 +89,23 @@ pub fn scan_directory(
                         // Test openability to skip locked/inaccessible files early
                         match std::fs::File::open(&path) {
                             Ok(_) => {
-                                let modified = meta.modified()
-                                    .map(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                                        .unwrap_or(std::time::Duration::ZERO)
-                                        .as_secs())
+                                let modified = meta
+                                    .modified()
+                                    .map(|t| {
+                                        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                            .unwrap_or(std::time::Duration::ZERO)
+                                            .as_secs()
+                                    })
                                     .unwrap_or(0);
 
                                 let crc32 = if calculate_crc32 {
                                     match calculate_file_crc32(&path) {
                                         Ok(c) => c,
                                         Err(e) => {
-                                            eprintln!("⚠️ Warning: Failed to compute CRC32 for {:?}: {}", path, e);
+                                            eprintln!(
+                                                "⚠️ Warning: Failed to compute CRC32 for {:?}: {}",
+                                                path, e
+                                            );
                                             continue; // Skip file if we can't read it to calculate checksum
                                         }
                                     }
@@ -109,7 +125,10 @@ pub fn scan_directory(
                                 });
                             }
                             Err(e) => {
-                                eprintln!("⚠️ Warning: Skipping inaccessible file {:?} (Cannot open: {})", path, e);
+                                eprintln!(
+                                    "⚠️ Warning: Skipping inaccessible file {:?} (Cannot open: {})",
+                                    path, e
+                                );
                             }
                         }
                     }
@@ -125,7 +144,15 @@ pub fn scan_directory(
             let excludes_clone = Arc::clone(&excludes);
             let sub_results: Result<Vec<Vec<FileEntry>>, std::io::Error> = subdirs
                 .into_par_iter()
-                .map(|subdir| walk(subdir, base_dir.clone(), Arc::clone(&includes_clone), Arc::clone(&excludes_clone), calculate_crc32))
+                .map(|subdir| {
+                    walk(
+                        subdir,
+                        base_dir.clone(),
+                        Arc::clone(&includes_clone),
+                        Arc::clone(&excludes_clone),
+                        calculate_crc32,
+                    )
+                })
                 .collect();
 
             let flat_results = sub_results?;
@@ -138,14 +165,22 @@ pub fn scan_directory(
 
     let includes_arc = Arc::new(includes.to_vec());
     let excludes_arc = Arc::new(excludes.to_vec());
-    walk(base_dir.to_path_buf(), base_dir.to_path_buf(), includes_arc, excludes_arc, calculate_crc32)
+    walk(
+        base_dir.to_path_buf(),
+        base_dir.to_path_buf(),
+        includes_arc,
+        excludes_arc,
+        calculate_crc32,
+    )
 }
 
 fn should_skip(rel_path: &str, includes: &[String], excludes: &[String]) -> bool {
     // 1. Exclude checks
     for pattern in excludes {
         if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
-            if glob_pattern.matches(rel_path) || rel_path.split('/').any(|comp| glob_pattern.matches(comp)) {
+            if glob_pattern.matches(rel_path)
+                || rel_path.split('/').any(|comp| glob_pattern.matches(comp))
+            {
                 return true;
             }
         }
@@ -156,7 +191,9 @@ fn should_skip(rel_path: &str, includes: &[String], excludes: &[String]) -> bool
         let mut matched = false;
         for pattern in includes {
             if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
-                if glob_pattern.matches(rel_path) || rel_path.split('/').any(|comp| glob_pattern.matches(comp)) {
+                if glob_pattern.matches(rel_path)
+                    || rel_path.split('/').any(|comp| glob_pattern.matches(comp))
+                {
                     matched = true;
                     break;
                 }
@@ -185,7 +222,12 @@ fn calculate_file_crc32(path: &Path) -> std::io::Result<u32> {
 }
 
 /// Runs a multi-stream network speedtest to find the optimal number of streams.
-pub fn run_speedtest_client(control_stream: &mut TcpStream, receiver_addr: &str) -> std::io::Result<usize> {
+pub fn run_speedtest_client(
+    control_stream: &mut MaybeEncryptedStream<TcpStream>,
+    receiver_addr: &str,
+    use_encryption: bool,
+    session_key: [u8; 32],
+) -> std::io::Result<usize> {
     let test_configs = vec![1, 2, 4, 8];
     let mut best_streams = 4;
     let mut best_speed = 0.0;
@@ -205,13 +247,23 @@ pub fn run_speedtest_client(control_stream: &mut TcpStream, receiver_addr: &str)
         let mut handles = Vec::with_capacity(k);
 
         // Pre-connect all streams to prevent server-side hang
-        let mut sockets = Vec::with_capacity(k);
+        let mut sockets: Vec<MaybeEncryptedStream<TcpStream>> = Vec::with_capacity(k);
         for stream_idx in 0..k {
-            let mut socket = TcpStream::connect(receiver_addr)?;
-            socket.write_all(b"FSTD")?;
+            let mut raw_socket = TcpStream::connect(receiver_addr)?;
+            raw_socket.write_all(b"FSTD")?;
             // Send special index with MSB set to indicate speedtest stream
             let speedtest_idx = (stream_idx as u32) | 0x8000_0000;
-            socket.write_all(&speedtest_idx.to_be_bytes())?;
+            raw_socket.write_all(&speedtest_idx.to_be_bytes())?;
+
+            let socket = if use_encryption {
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                    raw_socket,
+                    session_key,
+                    speedtest_idx,
+                ))
+            } else {
+                MaybeEncryptedStream::Raw(raw_socket)
+            };
             sockets.push(socket);
         }
 
@@ -253,10 +305,12 @@ pub fn run_speedtest_client(control_stream: &mut TcpStream, receiver_addr: &str)
     // Send command '0' (speedtest finished)
     control_stream.write_all(&[0u8])?;
 
-    println!("🏆 Selected optimal configuration: {} streams (max speed: {:.2} MB/s)\n", best_streams, best_speed);
+    println!(
+        "🏆 Selected optimal configuration: {} streams (max speed: {:.2} MB/s)\n",
+        best_streams, best_speed
+    );
     Ok(best_streams)
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct SenderOptions {
@@ -270,19 +324,28 @@ pub struct SenderOptions {
     pub discovery_port: u16,
     pub auto_accept: bool,
     pub pairing_code: Option<String>,
+    pub encrypt: bool,
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 { return None; }
+    if s.len() % 2 != 0 {
+        return None;
+    }
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i+2], 16).ok())
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
 }
 
 /// Runs a UDP client socket to scan for a broadcasting Receiver.
-pub fn discover_receiver(discovery_port: u16, auth_key: Option<String>) -> std::io::Result<Option<String>> {
-    println!("🔍 Scanning local network for Receiver (UDP discovery on port {})...", discovery_port);
+pub fn discover_receiver(
+    discovery_port: u16,
+    auth_key: Option<String>,
+) -> std::io::Result<Option<String>> {
+    println!(
+        "🔍 Scanning local network for Receiver (UDP discovery on port {})...",
+        discovery_port
+    );
     let socket = match std::net::UdpSocket::bind(format!("0.0.0.0:{}", discovery_port)) {
         Ok(s) => s,
         Err(e) => {
@@ -300,7 +363,9 @@ pub fn discover_receiver(discovery_port: u16, auth_key: Option<String>) -> std::
                 let parts: Vec<&str> = msg.split(':').collect();
                 if parts.len() == 3 {
                     if auth_key.is_some() {
-                        println!("⚠️ Discovered receiver does not use authentication, but authentication is required locally!");
+                        println!(
+                            "⚠️ Discovered receiver does not use authentication, but authentication is required locally!"
+                        );
                         return Ok(None);
                     }
                     let port = parts[1];
@@ -320,12 +385,14 @@ pub fn discover_receiver(discovery_port: u16, auth_key: Option<String>) -> std::
                             .as_secs();
 
                         // Prevent replay attack: check if timestamp is within 30 seconds
-                        if now.saturating_sub(timestamp) > 30 && timestamp.saturating_sub(now) > 30 {
+                        if now.saturating_sub(timestamp) > 30 && timestamp.saturating_sub(now) > 30
+                        {
                             println!("⚠️ UDP Discovery authentication signature expired!");
                             return Ok(None);
                         }
 
-                        let msg_prefix = format!("FSTP-RECEIVER:{}:{}:{}", port, hostname, timestamp_str);
+                        let msg_prefix =
+                            format!("FSTP-RECEIVER:{}:{}:{}", port, hostname, timestamp_str);
                         if let Some(sig_bytes) = hex_decode(sig_hex) {
                             if protocol::verify_hmac(&key, msg_prefix.as_bytes(), &sig_bytes) {
                                 let ip = src_addr.ip().to_string();
@@ -335,12 +402,17 @@ pub fn discover_receiver(discovery_port: u16, auth_key: Option<String>) -> std::
                             }
                         }
                     } else {
-                        println!("⚠️ Discovered receiver uses authentication, but local machine has no auth key configured!");
+                        println!(
+                            "⚠️ Discovered receiver uses authentication, but local machine has no auth key configured!"
+                        );
                     }
                 }
             }
         }
-        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+        Err(ref e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
             println!("⚠️ UDP Discovery timed out (no Receiver found).");
         }
         Err(e) => return Err(e),
@@ -358,7 +430,12 @@ pub fn run_sender(
 ) -> std::io::Result<()> {
     println!("🔍 Indexing source directory: {:?}", src_dir);
     let scan_start = Instant::now();
-    let files = scan_directory(&src_dir, &options.includes, &options.excludes, options.verify_existing)?;
+    let files = scan_directory(
+        &src_dir,
+        &options.includes,
+        &options.excludes,
+        options.verify_existing,
+    )?;
     let scan_duration = scan_start.elapsed();
 
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
@@ -370,14 +447,45 @@ pub fn run_sender(
     );
 
     println!("🔌 Connecting to receiver at {}...", receiver_addr);
-    let mut control_stream = TcpStream::connect(receiver_addr)?;
+    let mut raw_stream = TcpStream::connect(receiver_addr)?;
 
     // Send control connection magic bytes
-    control_stream.write_all(b"FSTP")?;
+    raw_stream.write_all(b"FSTP")?;
     // Send mode (1 = Send session)
-    control_stream.write_all(&[1u8])?;
+    raw_stream.write_all(&[1u8])?;
     // Send protocol version (2 = v2.0)
-    control_stream.write_all(&[2u8])?;
+    raw_stream.write_all(&[2u8])?;
+
+    // Send encrypt flag
+    let encrypt_byte = if options.encrypt { 1u8 } else { 0u8 };
+    raw_stream.write_all(&[encrypt_byte])?;
+
+    let mut session_key = [0u8; 32];
+    if options.encrypt {
+        use rand::RngCore;
+        let mut sender_nonce = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut sender_nonce);
+        raw_stream.write_all(&sender_nonce)?;
+
+        let mut receiver_nonce = [0u8; 32];
+        raw_stream.read_exact(&mut receiver_nonce)?;
+
+        use hmac::Mac;
+        let mut mac = hmac::SimpleHmac::<sha2::Sha256>::new_from_slice(
+            options.auth_key.as_ref().unwrap().as_bytes(),
+        )
+        .unwrap();
+        mac.update(&sender_nonce);
+        mac.update(&receiver_nonce);
+        session_key = mac.finalize().into_bytes().into();
+    }
+
+    use crate::encrypted_stream::{EncryptedStream, MaybeEncryptedStream};
+    let mut control_stream = if options.encrypt {
+        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0))
+    } else {
+        MaybeEncryptedStream::Raw(raw_stream)
+    };
 
     // --- AUTHENTICATION HANDSHAKE ---
     let mut auth_required_byte = [0u8; 1];
@@ -457,11 +565,14 @@ pub fn run_sender(
 
     // If stream count is specified as 0, or if we want to auto-tune, run the speedtest
     if num_streams == 0 {
-        num_streams = run_speedtest_client(&mut control_stream, receiver_addr)?;
+        num_streams = run_speedtest_client(&mut control_stream, receiver_addr, options.encrypt, session_key)?;
     } else {
         // Let the server know we are skipping the speedtest
         control_stream.write_all(&[0u8])?;
-        println!("🚀 Skipping speedtest, using user-specified {} streams...", num_streams);
+        println!(
+            "🚀 Skipping speedtest, using user-specified {} streams...",
+            num_streams
+        );
     }
 
     // Send selected stream count for the actual file transfer phase
@@ -492,16 +603,27 @@ pub fn run_sender(
     if options.dry_run {
         println!("\n================ [ DRY RUN REPORT ] ================");
         println!("📂 Files Scanned: {}", files.len());
-        println!("⏭️ Files Skipped: {}", files.len() - files_to_transfer.len());
+        println!(
+            "⏭️ Files Skipped: {}",
+            files.len() - files_to_transfer.len()
+        );
         println!("📥 Files to Copy: {}", files_to_transfer.len());
-        println!("📊 Total Bytes to Copy: {:.2} MB", total_bytes_to_transfer as f64 / 1_048_576.0);
+        println!(
+            "📊 Total Bytes to Copy: {:.2} MB",
+            total_bytes_to_transfer as f64 / 1_048_576.0
+        );
         println!("🧵 Parallel Streams Configured: {}", num_streams);
 
         let buckets = protocol::partition_files(&files_to_transfer, num_streams);
         println!("\n🧵 Estimated Bucket Splits (Longest Processing Time First):");
         for (i, bucket) in buckets.iter().enumerate() {
             let size: u64 = bucket.iter().map(|f| f.transfer_size()).sum();
-            println!("  Stream {}: {} files ({:.2} MB)", i, bucket.len(), size as f64 / 1_048_576.0);
+            println!(
+                "  Stream {}: {} files ({:.2} MB)",
+                i,
+                bucket.len(),
+                size as f64 / 1_048_576.0
+            );
         }
         println!("====================================================");
         println!("🛑 Dry run complete. Connection terminated.");
@@ -551,6 +673,8 @@ pub fn run_sender(
         let pb = Arc::clone(&pb);
         let src_dir = Arc::clone(&src_dir_arc);
         let addr = receiver_addr_str.clone();
+        let use_encryption = options.encrypt;
+        let s_key = session_key;
 
         let handle = thread::spawn(move || -> std::io::Result<()> {
             if bucket.is_empty() {
@@ -558,9 +682,19 @@ pub fn run_sender(
             }
 
             // Open a data connection to the receiver
-            let mut data_stream = TcpStream::connect(&addr)?;
-            data_stream.write_all(b"FSTD")?;
-            data_stream.write_all(&(stream_idx as u32).to_be_bytes())?;
+            let mut raw_data_stream = TcpStream::connect(&addr)?;
+            raw_data_stream.write_all(b"FSTD")?;
+            raw_data_stream.write_all(&(stream_idx as u32).to_be_bytes())?;
+
+            let data_stream = if use_encryption {
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(
+                    raw_data_stream,
+                    s_key,
+                    (stream_idx as u32) + 1,
+                ))
+            } else {
+                MaybeEncryptedStream::Raw(raw_data_stream)
+            };
 
             // Wrap in compression if enabled
             let mut writer = if use_compression {
@@ -603,7 +737,9 @@ pub fn run_sender(
 
             writer.flush()?;
             if let protocol::StreamType::Compressed(encoder) = writer {
-                encoder.finish().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                encoder
+                    .finish()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             }
             Ok(())
         });
@@ -639,12 +775,21 @@ pub fn run_sender(
 
     println!("\n================ [ TRANSFER SUMMARY ] ================");
     println!("📂 Files Scanned: {}", files.len());
-    println!("⏭️ Files Skipped: {}", files.len() - files_to_transfer.len());
+    println!(
+        "⏭️ Files Skipped: {}",
+        files.len() - files_to_transfer.len()
+    );
     println!("📥 Files Transferred: {}", files_to_transfer.len());
-    println!("📊 Total Data Transferred: {:.2} MB", total_bytes_to_transfer as f64 / 1_048_576.0);
+    println!(
+        "📊 Total Data Transferred: {:.2} MB",
+        total_bytes_to_transfer as f64 / 1_048_576.0
+    );
     println!("⏱️ Time Elapsed: {:?}", elapsed);
     println!("⚡ Average Speed: {:.2} MB/s", avg_speed_mb);
-    println!("🗜️ LZ4 Compression: {}", if use_compression { "ON" } else { "OFF" });
+    println!(
+        "🗜️ LZ4 Compression: {}",
+        if use_compression { "ON" } else { "OFF" }
+    );
     println!("🧵 Parallel Streams: {}", num_streams);
     println!("======================================================\n");
 
@@ -658,15 +803,49 @@ pub fn run_benchmark_sender(
     duration_secs: u32,
     options: SenderOptions,
 ) -> std::io::Result<()> {
-    println!("🔌 Connecting to receiver at {} for benchmark...", receiver_addr);
-    let mut control_stream = TcpStream::connect(receiver_addr)?;
+    println!(
+        "🔌 Connecting to receiver at {} for benchmark...",
+        receiver_addr
+    );
+    let mut raw_stream = TcpStream::connect(receiver_addr)?;
 
     // Send control connection magic bytes
-    control_stream.write_all(b"FSTP")?;
+    raw_stream.write_all(b"FSTP")?;
     // Send mode (3 = Benchmark session)
-    control_stream.write_all(&[3u8])?;
+    raw_stream.write_all(&[3u8])?;
     // Send protocol version (2 = v2.0)
-    control_stream.write_all(&[2u8])?;
+    raw_stream.write_all(&[2u8])?;
+
+    // Send encrypt flag
+    let encrypt_byte = if options.encrypt { 1u8 } else { 0u8 };
+    raw_stream.write_all(&[encrypt_byte])?;
+
+    let mut session_key = [0u8; 32];
+    if options.encrypt {
+        use rand::RngCore;
+        let mut sender_nonce = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut sender_nonce);
+        raw_stream.write_all(&sender_nonce)?;
+
+        let mut receiver_nonce = [0u8; 32];
+        raw_stream.read_exact(&mut receiver_nonce)?;
+
+        use hmac::Mac;
+        let mut mac = hmac::SimpleHmac::<sha2::Sha256>::new_from_slice(
+            options.auth_key.as_ref().unwrap().as_bytes(),
+        )
+        .unwrap();
+        mac.update(&sender_nonce);
+        mac.update(&receiver_nonce);
+        session_key = mac.finalize().into_bytes().into();
+    }
+
+    use crate::encrypted_stream::{EncryptedStream, MaybeEncryptedStream};
+    let mut control_stream = if options.encrypt {
+        MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_stream, session_key, 0))
+    } else {
+        MaybeEncryptedStream::Raw(raw_stream)
+    };
 
     // --- AUTHENTICATION HANDSHAKE ---
     let mut auth_required_byte = [0u8; 1];
@@ -745,6 +924,12 @@ pub fn run_benchmark_sender(
     }
 
     // Now call the benchmark client flood logic
-    crate::benchmark::run_benchmark_client(receiver_addr, num_streams, duration_secs, control_stream)
+    crate::benchmark::run_benchmark_client(
+        receiver_addr,
+        num_streams,
+        duration_secs,
+        control_stream,
+        options.encrypt,
+        session_key,
+    )
 }
-

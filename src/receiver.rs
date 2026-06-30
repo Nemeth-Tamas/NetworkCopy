@@ -8,9 +8,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+use crate::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
 
 /// Runs the server-side speedtest loop, listening and measuring client data bursts.
-pub fn run_speedtest_server(control_stream: &mut TcpStream, listener: &TcpListener) -> std::io::Result<()> {
+pub fn run_speedtest_server(
+    control_stream: &mut MaybeEncryptedStream<TcpStream>,
+    listener: &TcpListener,
+    use_encryption: bool,
+    session_key: [u8; 32],
+) -> std::io::Result<()> {
     loop {
         let mut cmd = [0u8; 1];
         control_stream.read_exact(&mut cmd)?;
@@ -29,13 +35,13 @@ pub fn run_speedtest_server(control_stream: &mut TcpStream, listener: &TcpListen
         control_stream.flush()?;
 
         // Pre-accept all data streams
-        let mut sockets = Vec::with_capacity(k);
+        let mut sockets: Vec<MaybeEncryptedStream<TcpStream>> = Vec::with_capacity(k);
         for _ in 0..k {
-            let (mut socket, _) = listener.accept()?;
+            let (mut raw_socket, _) = listener.accept()?;
 
             // Verify data stream magic bytes
             let mut magic = [0u8; 4];
-            socket.read_exact(&mut magic)?;
+            raw_socket.read_exact(&mut magic)?;
             if &magic != b"FSTD" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -45,7 +51,7 @@ pub fn run_speedtest_server(control_stream: &mut TcpStream, listener: &TcpListen
 
             // Verify stream index (has speedtest bit set)
             let mut idx_bytes = [0u8; 4];
-            socket.read_exact(&mut idx_bytes)?;
+            raw_socket.read_exact(&mut idx_bytes)?;
             let idx = u32::from_be_bytes(idx_bytes);
             if idx & 0x8000_0000 == 0 {
                 return Err(std::io::Error::new(
@@ -53,6 +59,12 @@ pub fn run_speedtest_server(control_stream: &mut TcpStream, listener: &TcpListen
                     "Expected speedtest stream bit",
                 ));
             }
+
+            let socket = if use_encryption {
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(raw_socket, session_key, idx))
+            } else {
+                MaybeEncryptedStream::Raw(raw_socket)
+            };
             sockets.push(socket);
         }
 
@@ -108,6 +120,7 @@ pub struct ReceiverOptions {
     pub control_port: u16,
     pub discovery_port: u16,
     pub pairing_code: Option<String>,
+    pub encrypt: bool,
 }
 
 
@@ -239,6 +252,44 @@ pub fn run_receiver(
             continue;
         }
 
+        // Read encrypt flag
+        let mut encrypt_flag = [0u8; 1];
+        control_stream.read_exact(&mut encrypt_flag)?;
+        let client_wants_encrypt = encrypt_flag[0] == 1;
+
+        if client_wants_encrypt != options.encrypt {
+            eprintln!("⚠️ Encryption settings mismatch: client wants encrypt = {}, server config = {}", client_wants_encrypt, options.encrypt);
+            if !options.loop_mode {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Encryption config mismatch"));
+            }
+            continue;
+        }
+
+        let mut session_key = [0u8; 32];
+        if options.encrypt {
+            let mut sender_nonce = [0u8; 32];
+            control_stream.read_exact(&mut sender_nonce)?;
+
+            use rand::RngCore;
+            let mut receiver_nonce = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut receiver_nonce);
+            control_stream.write_all(&receiver_nonce)?;
+            control_stream.flush()?;
+
+            use hmac::Mac;
+            let mut mac = hmac::SimpleHmac::<sha2::Sha256>::new_from_slice(options.auth_key.as_ref().unwrap().as_bytes()).unwrap();
+            mac.update(&sender_nonce);
+            mac.update(&receiver_nonce);
+            session_key = mac.finalize().into_bytes().into();
+        }
+
+        use crate::encrypted_stream::{MaybeEncryptedStream, EncryptedStream};
+        let mut control_stream = if options.encrypt {
+            MaybeEncryptedStream::Encrypted(EncryptedStream::new(control_stream, session_key, 0))
+        } else {
+            MaybeEncryptedStream::Raw(control_stream)
+        };
+
         // --- AUTHENTICATION HANDSHAKE ---
         let auth_required = options.auth_key.is_some();
         control_stream.write_all(&[if auth_required { 1u8 } else { 0u8 }])?;
@@ -325,7 +376,7 @@ pub fn run_receiver(
         }
 
         if mode[0] == 3 {
-            if let Err(e) = crate::benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener) {
+            if let Err(e) = crate::benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener, options.encrypt, session_key) {
                 eprintln!("⚠️ Benchmark failed: {}", e);
             }
             if !options.loop_mode {
@@ -335,7 +386,7 @@ pub fn run_receiver(
         }
 
         // Run speedtest server logic (it will loop until command 0 is received)
-        if let Err(e) = run_speedtest_server(&mut control_stream, &listener) {
+        if let Err(e) = run_speedtest_server(&mut control_stream, &listener, options.encrypt, session_key) {
             eprintln!("⚠️ Speedtest failed: {}", e);
             if !options.loop_mode {
                 return Err(e);
@@ -550,6 +601,14 @@ pub fn run_receiver(
             let dst_dir = Arc::clone(&dst_dir_arc);
             let bucket = buckets_arc[stream_idx].clone();
             let pb = Arc::clone(&pb);
+            let use_encryption = options.encrypt;
+            let s_key = session_key;
+
+            let socket = if use_encryption {
+                MaybeEncryptedStream::Encrypted(EncryptedStream::new(socket, s_key, (stream_idx as u32) + 1))
+            } else {
+                MaybeEncryptedStream::Raw(socket)
+            };
 
             let handle = thread::spawn(move || -> std::io::Result<()> {
                 let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
