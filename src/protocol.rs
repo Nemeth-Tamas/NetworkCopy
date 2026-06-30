@@ -7,6 +7,14 @@ pub struct FileEntry {
     pub size: u64,
     pub modified: u64, // Last modification time in seconds since Unix Epoch
     pub crc32: u32,    // CRC32 checksum of the file
+    pub permissions: u32, // Unix mode permissions (e.g. 0o755)
+    pub offset: u64,   // Progress offset for partial resume (in-memory only)
+}
+
+impl FileEntry {
+    pub fn transfer_size(&self) -> u64 {
+        self.size.saturating_sub(self.offset)
+    }
 }
 
 /// Sanitizes relative paths to prevent directory traversal and OS exploits.
@@ -85,6 +93,8 @@ pub fn write_index<W: Write>(writer: &mut W, files: &[FileEntry]) -> std::io::Re
         writer.write_all(&file.modified.to_be_bytes())?;
         // Write CRC32 checksum as u32 (big-endian)
         writer.write_all(&file.crc32.to_be_bytes())?;
+        // Write Unix permissions as u32 (big-endian)
+        writer.write_all(&file.permissions.to_be_bytes())?;
     }
     writer.flush()?;
     Ok(())
@@ -119,35 +129,52 @@ pub fn read_index<R: Read>(reader: &mut R) -> std::io::Result<Vec<FileEntry>> {
         reader.read_exact(&mut crc_bytes)?;
         let crc32 = u32::from_be_bytes(crc_bytes);
 
-        files.push(FileEntry { rel_path, size, modified, crc32 });
+        let mut perm_bytes = [0u8; 4];
+        reader.read_exact(&mut perm_bytes)?;
+        let permissions = u32::from_be_bytes(perm_bytes);
+
+        files.push(FileEntry { rel_path, size, modified, crc32, permissions, offset: 0 });
     }
 
     Ok(files)
 }
 
-/// Serializes the list of file indices to transfer.
-pub fn write_transfer_list<W: Write>(writer: &mut W, indices: &[u32]) -> std::io::Result<()> {
-    writer.write_all(&(indices.len() as u32).to_be_bytes())?;
-    for &idx in indices {
-        writer.write_all(&idx.to_be_bytes())?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferRequest {
+    pub file_idx: u32,
+    pub offset: u64,
+}
+
+/// Serializes the list of file transfer requests (including resume offsets).
+pub fn write_transfer_list<W: Write>(writer: &mut W, requests: &[TransferRequest]) -> std::io::Result<()> {
+    writer.write_all(&(requests.len() as u32).to_be_bytes())?;
+    for req in requests {
+        writer.write_all(&req.file_idx.to_be_bytes())?;
+        writer.write_all(&req.offset.to_be_bytes())?;
     }
     writer.flush()?;
     Ok(())
 }
 
-/// Deserializes the list of file indices to transfer.
-pub fn read_transfer_list<R: Read>(reader: &mut R) -> std::io::Result<Vec<u32>> {
+/// Deserializes the list of file transfer requests (including resume offsets).
+pub fn read_transfer_list<R: Read>(reader: &mut R) -> std::io::Result<Vec<TransferRequest>> {
     let mut len_bytes = [0u8; 4];
     reader.read_exact(&mut len_bytes)?;
     let count = u32::from_be_bytes(len_bytes) as usize;
 
-    let mut indices = Vec::with_capacity(count);
+    let mut requests = Vec::with_capacity(count);
     for _ in 0..count {
         let mut idx_bytes = [0u8; 4];
         reader.read_exact(&mut idx_bytes)?;
-        indices.push(u32::from_be_bytes(idx_bytes));
+        let file_idx = u32::from_be_bytes(idx_bytes);
+
+        let mut offset_bytes = [0u8; 8];
+        reader.read_exact(&mut offset_bytes)?;
+        let offset = u64::from_be_bytes(offset_bytes);
+
+        requests.push(TransferRequest { file_idx, offset });
     }
-    Ok(indices)
+    Ok(requests)
 }
 
 /// Partitions the list of files into `num_buckets` partitions using a greedy algorithm.
@@ -161,9 +188,9 @@ pub fn partition_files(files: &[FileEntry], num_buckets: usize) -> Vec<Vec<FileE
     let mut buckets = vec![Vec::new(); num_buckets];
     let mut bucket_sizes = vec![0u64; num_buckets];
 
-    // Sort a copy of files by size in descending order
+    // Sort a copy of files by transfer_size in descending order
     let mut sorted_files = files.to_vec();
-    sorted_files.sort_by(|a, b| b.size.cmp(&a.size));
+    sorted_files.sort_by(|a, b| b.transfer_size().cmp(&a.transfer_size()));
 
     for file in sorted_files {
         // Find the index of the bucket with the minimum total size
@@ -177,7 +204,7 @@ pub fn partition_files(files: &[FileEntry], num_buckets: usize) -> Vec<Vec<FileE
         }
 
         // Add file to this bucket
-        bucket_sizes[min_idx] += file.size;
+        bucket_sizes[min_idx] += file.transfer_size();
         buckets[min_idx].push(file);
     }
 

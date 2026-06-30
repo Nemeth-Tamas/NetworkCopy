@@ -228,6 +228,17 @@ pub fn run_receiver(
             continue;
         }
 
+        // Read protocol version (2 = v2.0)
+        let mut version = [0u8; 1];
+        control_stream.read_exact(&mut version)?;
+        if version[0] != 2 {
+            eprintln!("⚠️ Protocol version mismatch: expected 2, got {}", version[0]);
+            if !options.loop_mode {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Protocol version mismatch"));
+            }
+            continue;
+        }
+
         // --- AUTHENTICATION HANDSHAKE ---
         let auth_required = options.auth_key.is_some();
         control_stream.write_all(&[if auth_required { 1u8 } else { 0u8 }])?;
@@ -363,12 +374,14 @@ pub fn run_receiver(
             continue;
         }
 
-        // Smart Resume: Check existing files
+        // Smart Resume: Check existing files and negotiate resume offsets
         println!("🔍 Checking destination for files to skip (smart resume)...");
-        let mut to_transfer_indices = Vec::new();
-        for (idx, file) in files.iter().enumerate() {
+        let mut to_transfer_requests = Vec::new();
+        for (idx, file) in files.iter_mut().enumerate() {
             let full_path = dst_dir.join(&file.rel_path);
             let mut skip = false;
+            let mut resume_offset = 0u64;
+
             if full_path.exists() {
                 if let Ok(meta) = std::fs::metadata(&full_path) {
                     if meta.is_file() && meta.len() == file.size {
@@ -391,13 +404,33 @@ pub fn run_receiver(
                     }
                 }
             }
+
             if !skip {
-                to_transfer_indices.push(idx as u32);
+                // Determine if a partial temp file exists for resume
+                let mut tmp_name = full_path.file_name().unwrap_or_default().to_os_string();
+                tmp_name.push(".networkcopy-tmp");
+                let tmp_path = full_path.with_file_name(tmp_name);
+
+                if tmp_path.exists() {
+                    if let Ok(tmp_meta) = std::fs::metadata(&tmp_path) {
+                        let tmp_size = tmp_meta.len();
+                        if tmp_size > 0 && tmp_size < file.size {
+                            resume_offset = tmp_size;
+                            file.offset = tmp_size; // Store in memory
+                            println!("⏩ Found partial temp file for {:?}. Resuming from byte {}.", file.rel_path, resume_offset);
+                        }
+                    }
+                }
+
+                to_transfer_requests.push(protocol::TransferRequest {
+                    file_idx: idx as u32,
+                    offset: resume_offset,
+                });
             }
         }
 
         // Send transfer list back to Sender
-        protocol::write_transfer_list(&mut control_stream, &to_transfer_indices)?;
+        protocol::write_transfer_list(&mut control_stream, &to_transfer_requests)?;
 
         if is_dry_run {
             println!("🛑 Dry-run requested by sender. Cleaning up session.");
@@ -408,12 +441,14 @@ pub fn run_receiver(
         }
 
         // Filter index list
-        let mut files_to_transfer = Vec::with_capacity(to_transfer_indices.len());
-        for &idx in &to_transfer_indices {
-            files_to_transfer.push(files[idx as usize].clone());
+        let mut files_to_transfer = Vec::with_capacity(to_transfer_requests.len());
+        for req in &to_transfer_requests {
+            let mut file_info = files[req.file_idx as usize].clone();
+            file_info.offset = req.offset;
+            files_to_transfer.push(file_info);
         }
 
-        let total_bytes_to_transfer: u64 = files_to_transfer.iter().map(|f| f.size).sum();
+        let total_bytes_to_transfer: u64 = files_to_transfer.iter().map(|f| f.transfer_size()).sum();
         println!(
             "📂 Index processed: {}/{} files require transfer ({:.2} MB). Skipping others.",
             files_to_transfer.len(),
@@ -429,8 +464,8 @@ pub fn run_receiver(
                 std::fs::create_dir_all(parent)?;
             }
 
-            // Clean up pre-existing temp file from any aborted run
-            if file.size > 0 {
+            // Clean up pre-existing temp file from any aborted run, unless we are resuming it
+            if file.size > 0 && file.offset == 0 {
                 let mut tmp_name = full_path.file_name().unwrap_or_default().to_os_string();
                 tmp_name.push(".networkcopy-tmp");
                 let tmp_path = full_path.with_file_name(tmp_name);
@@ -517,7 +552,7 @@ pub fn run_receiver(
                 };
 
                 for file_entry in bucket {
-                    if file_entry.size == 0 {
+                    if file_entry.transfer_size() == 0 {
                         continue;
                     }
 
@@ -526,9 +561,13 @@ pub fn run_receiver(
                     tmp_name.push(".networkcopy-tmp");
                     let tmp_path = full_path.with_file_name(tmp_name);
                     
-                    let file = File::create(&tmp_path)?;
+                    let file = if file_entry.offset > 0 {
+                        std::fs::OpenOptions::new().write(true).append(true).open(&tmp_path)?
+                    } else {
+                        File::create(&tmp_path)?
+                    };
                     let mut writer = BufWriter::new(file);
-                    let mut bytes_left = file_entry.size;
+                    let mut bytes_left = file_entry.transfer_size();
 
                     let mut hasher = crc32fast::Hasher::new();
 
@@ -543,7 +582,7 @@ pub fn run_receiver(
                     writer.flush()?;
                     drop(writer); // Close file handle
 
-                    // Read and verify 4-byte CRC32 checksum
+                    // Read and verify 4-byte CRC32 checksum (of the transferred chunk only)
                     let mut checksum_bytes = [0u8; 4];
                     reader.read_exact(&mut checksum_bytes)?;
                     let expected_checksum = u32::from_be_bytes(checksum_bytes);
@@ -559,6 +598,14 @@ pub fn run_receiver(
 
                     // Rename temp file to target path
                     std::fs::rename(&tmp_path, &full_path)?;
+
+                    // Preserve Unix permissions if applicable
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(file_entry.permissions);
+                        let _ = std::fs::set_permissions(&full_path, perms);
+                    }
 
                     // Preserve modification times
                     if let Some(modified_time) = std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(file_entry.modified)) {

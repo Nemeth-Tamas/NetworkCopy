@@ -12,6 +12,17 @@ use rayon::prelude::*;
 
 use crate::protocol::{self, FileEntry};
 
+#[cfg(unix)]
+fn get_file_permissions(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode()
+}
+
+#[cfg(not(unix))]
+fn get_file_permissions(_meta: &std::fs::Metadata) -> u32 {
+    0o644
+}
+
 /// Recursively scas a directory in parallel using Rayon.
 pub fn scan_directory(
     base_dir: &Path,
@@ -86,11 +97,15 @@ pub fn scan_directory(
                                     0
                                 };
 
+                                let permissions = get_file_permissions(&meta);
+
                                 entries.push(FileEntry {
                                     rel_path: rel_path_normalized,
                                     size: meta.len(),
                                     modified,
                                     crc32,
+                                    permissions,
+                                    offset: 0,
                                 });
                             }
                             Err(e) => {
@@ -361,6 +376,8 @@ pub fn run_sender(
     control_stream.write_all(b"FSTP")?;
     // Send mode (1 = Send session)
     control_stream.write_all(&[1u8])?;
+    // Send protocol version (2 = v2.0)
+    control_stream.write_all(&[2u8])?;
 
     // --- AUTHENTICATION HANDSHAKE ---
     let mut auth_required_byte = [0u8; 1];
@@ -460,15 +477,17 @@ pub fn run_sender(
     protocol::write_index(&mut control_stream, &files)?;
 
     println!("⏳ Waiting for receiver to check files for smart resume...");
-    let to_transfer_indices = protocol::read_transfer_list(&mut control_stream)?;
+    let to_transfer_requests = protocol::read_transfer_list(&mut control_stream)?;
 
-    let mut files_to_transfer = Vec::with_capacity(to_transfer_indices.len());
-    for &idx in &to_transfer_indices {
-        if (idx as usize) < files.len() {
-            files_to_transfer.push(files[idx as usize].clone());
+    let mut files_to_transfer = Vec::with_capacity(to_transfer_requests.len());
+    for req in &to_transfer_requests {
+        if (req.file_idx as usize) < files.len() {
+            let mut file_info = files[req.file_idx as usize].clone();
+            file_info.offset = req.offset;
+            files_to_transfer.push(file_info);
         }
     }
-    let total_bytes_to_transfer: u64 = files_to_transfer.iter().map(|f| f.size).sum();
+    let total_bytes_to_transfer: u64 = files_to_transfer.iter().map(|f| f.transfer_size()).sum();
 
     if options.dry_run {
         println!("\n================ [ DRY RUN REPORT ] ================");
@@ -481,7 +500,7 @@ pub fn run_sender(
         let buckets = protocol::partition_files(&files_to_transfer, num_streams);
         println!("\n🧵 Estimated Bucket Splits (Longest Processing Time First):");
         for (i, bucket) in buckets.iter().enumerate() {
-            let size: u64 = bucket.iter().map(|f| f.size).sum();
+            let size: u64 = bucket.iter().map(|f| f.transfer_size()).sum();
             println!("  Stream {}: {} files ({:.2} MB)", i, bucket.len(), size as f64 / 1_048_576.0);
         }
         println!("====================================================");
@@ -553,14 +572,18 @@ pub fn run_sender(
             let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
 
             for file_entry in bucket {
-                if file_entry.size == 0 {
+                if file_entry.transfer_size() == 0 {
                     continue;
                 }
 
                 let full_path = src_dir.join(&file_entry.rel_path);
-                let file = File::open(&full_path)?;
+                let mut file = File::open(&full_path)?;
+                if file_entry.offset > 0 {
+                    use std::io::Seek;
+                    file.seek(std::io::SeekFrom::Start(file_entry.offset))?;
+                }
                 let mut reader = BufReader::new(file);
-                let mut bytes_left = file_entry.size;
+                let mut bytes_left = file_entry.transfer_size();
 
                 let mut hasher = crc32fast::Hasher::new();
 
@@ -573,7 +596,7 @@ pub fn run_sender(
                     bytes_left -= to_read as u64;
                 }
 
-                // Write 4-byte CRC32 checksum
+                // Write 4-byte CRC32 checksum (of the transferred chunk only)
                 let checksum = hasher.finalize();
                 writer.write_all(&checksum.to_be_bytes())?;
             }

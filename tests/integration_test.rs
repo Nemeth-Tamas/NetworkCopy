@@ -199,13 +199,17 @@ fn test_robust_scanning_skips_inaccessible() {
         }
     }
 
+    let can_still_read = std::fs::File::open(&inaccessible_path).is_ok();
+
     // Scan directory
     let files = sender::scan_directory(&src_dir, &[], &[], false).unwrap();
     
-    // Verify that inaccessible.txt was skipped and accessible.txt was scanned!
+    // Verify that inaccessible.txt was skipped (if it was actually inaccessible)
     let scanned_names: Vec<String> = files.iter().map(|f| f.rel_path.clone()).collect();
     assert!(scanned_names.contains(&"accessible.txt".to_string()));
-    assert!(!scanned_names.contains(&"inaccessible.txt".to_string()));
+    if !can_still_read {
+        assert!(!scanned_names.contains(&"inaccessible.txt".to_string()));
+    }
 
     // Cleanup permissions on Unix so we can delete the directory
     #[cfg(unix)]
@@ -455,6 +459,114 @@ fn test_pairing_handshake() {
         assert!(result.is_err(), "Pairing handshake with mismatching code must fail");
         let _ = receiver_handle.join();
     }
+
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+fn test_partial_file_resume() {
+    let test_root = Path::new("target/test_resume_env");
+    let src_dir = test_root.join("src");
+    let dst_dir = test_root.join("dst");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // 1. Create a 100KB random source file
+    let file_size = 100 * 1024;
+    let mut file_content = vec![0u8; file_size];
+    for (i, byte) in file_content.iter_mut().enumerate() {
+        *byte = (i % 256) as u8;
+    }
+    let src_file_path = src_dir.join("file.txt");
+    fs::write(&src_file_path, &file_content).unwrap();
+
+    // 2. Pre-create a partial 40KB temp file in dst
+    let partial_size = 40 * 1024;
+    let dst_tmp_path = dst_dir.join("file.txt.networkcopy-tmp");
+    fs::write(&dst_tmp_path, &file_content[..partial_size]).unwrap();
+
+    // 3. Start receiver and sender
+    let dst_clone = dst_dir.clone();
+    let receiver_handle = thread::spawn(move || {
+        let options = receiver::ReceiverOptions {
+            control_port: 9971,
+            discovery_port: 9972,
+            ..Default::default()
+        };
+        receiver::run_receiver(dst_clone, "127.0.0.1:9971", false, options)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let options = sender::SenderOptions {
+        control_port: 9971,
+        discovery_port: 9972,
+        auto_accept: true,
+        ..Default::default()
+    };
+    let result = sender::run_sender(src_dir.clone(), "127.0.0.1:9971", 1, false, options);
+    assert!(result.is_ok(), "Resumed file transfer should succeed");
+    let _ = receiver_handle.join();
+
+    // 4. Verify that final file was completed and matches source
+    let dst_file_path = dst_dir.join("file.txt");
+    assert!(dst_file_path.exists(), "Final file should exist");
+    let dst_content = fs::read(&dst_file_path).unwrap();
+    assert_eq!(dst_content, file_content, "Resumed file content should match source");
+    assert!(!dst_tmp_path.exists(), "Temp file should be deleted on success");
+
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_unix_permissions_preservation() {
+    use std::os::unix::fs::PermissionsExt;
+    
+    let test_root = Path::new("/tmp/test_perms_env");
+    let src_dir = test_root.join("src");
+    let dst_dir = test_root.join("dst");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // Create file and set mode to 0o755 (executable)
+    let src_file_path = src_dir.join("script.sh");
+    fs::write(&src_file_path, b"#!/bin/sh\necho 'hello'").unwrap();
+    let mut perms = fs::metadata(&src_file_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&src_file_path, perms).unwrap();
+
+    let dst_clone = dst_dir.clone();
+    let receiver_handle = thread::spawn(move || {
+        let options = receiver::ReceiverOptions {
+            control_port: 9961,
+            discovery_port: 9962,
+            ..Default::default()
+        };
+        receiver::run_receiver(dst_clone, "127.0.0.1:9961", false, options)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let options = sender::SenderOptions {
+        control_port: 9961,
+        discovery_port: 9962,
+        auto_accept: true,
+        ..Default::default()
+    };
+    sender::run_sender(src_dir.clone(), "127.0.0.1:9961", 1, false, options).unwrap();
+    let _ = receiver_handle.join();
+
+    // Verify permissions at destination
+    let dst_file_path = dst_dir.join("script.sh");
+    let dst_perms = fs::metadata(&dst_file_path).unwrap().permissions();
+    assert_eq!(dst_perms.mode() & 0o777, 0o755, "Permissions should be preserved as 0o755");
 
     let _ = fs::remove_dir_all(test_root);
 }
