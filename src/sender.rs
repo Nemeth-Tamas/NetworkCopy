@@ -652,3 +652,99 @@ pub fn run_sender(
     Ok(())
 }
 
+pub fn run_benchmark_sender(
+    receiver_addr: &str,
+    num_streams: usize,
+    duration_secs: u32,
+    options: SenderOptions,
+) -> std::io::Result<()> {
+    println!("🔌 Connecting to receiver at {} for benchmark...", receiver_addr);
+    let mut control_stream = TcpStream::connect(receiver_addr)?;
+
+    // Send control connection magic bytes
+    control_stream.write_all(b"FSTP")?;
+    // Send mode (3 = Benchmark session)
+    control_stream.write_all(&[3u8])?;
+    // Send protocol version (2 = v2.0)
+    control_stream.write_all(&[2u8])?;
+
+    // --- AUTHENTICATION HANDSHAKE ---
+    let mut auth_required_byte = [0u8; 1];
+    control_stream.read_exact(&mut auth_required_byte)?;
+    let auth_required = auth_required_byte[0] == 1;
+
+    if auth_required {
+        if let Some(key) = &options.auth_key {
+            // Read 32-byte challenge
+            let mut challenge = [0u8; 32];
+            control_stream.read_exact(&mut challenge)?;
+
+            // Compute HMAC response
+            let response = protocol::compute_hmac(key, &challenge);
+            control_stream.write_all(&response)?;
+
+            // Read validation result
+            let mut result = [0u8; 1];
+            control_stream.read_exact(&mut result)?;
+            if result[0] != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "HMAC authentication failed (Receiver rejected connection)",
+                ));
+            }
+            println!("🔒 HMAC authentication successful!");
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Receiver requires authentication, but no local `--auth` key was provided!",
+            ));
+        }
+    } else if options.auth_key.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Local machine expects authentication, but the Receiver is running in unauthenticated mode!",
+        ));
+    }
+
+    // --- PAIRING CODE HANDSHAKE ---
+    let mut pairing_required_byte = [0u8; 1];
+    control_stream.read_exact(&mut pairing_required_byte)?;
+    let pairing_required = pairing_required_byte[0] == 1;
+
+    if pairing_required {
+        let code = if let Some(c) = &options.pairing_code {
+            c.clone()
+        } else if options.auto_accept {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Pairing code confirmation is required, but `--yes` / automatic confirmation is active without manual pairing input!",
+            ));
+        } else {
+            print!("🔑 Enter pairing code displayed on receiver: ");
+            std::io::stdout().flush().unwrap();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            input.trim().to_string()
+        };
+
+        // Write pairing code length and value
+        let code_bytes = code.as_bytes();
+        control_stream.write_all(&(code_bytes.len() as u32).to_be_bytes())?;
+        control_stream.write_all(code_bytes)?;
+
+        // Read pairing check result
+        let mut pairing_result = [0u8; 1];
+        control_stream.read_exact(&mut pairing_result)?;
+        if pairing_result[0] != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Pairing verification failed (Incorrect pairing code)",
+            ));
+        }
+        println!("🔑 Pairing verification successful!");
+    }
+
+    // Now call the benchmark client flood logic
+    crate::benchmark::run_benchmark_client(receiver_addr, num_streams, duration_secs, control_stream)
+}
+

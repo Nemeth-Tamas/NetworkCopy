@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use networkcopy::{receiver::{self, ReceiverOptions}, sender::{self, SenderOptions}};
+use networkcopy::{receiver::{self, ReceiverOptions}, sender::{self, SenderOptions}, benchmark, preset::run_preset};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -101,6 +101,37 @@ enum Commands {
         /// Bypass interactive prompts (e.g. bypass folder picker in loop mode)
         #[arg(short, long)]
         yes: bool,
+    },
+    /// Run a transfer job defined in a JSON preset file
+    Preset {
+        /// Path to the JSON preset file
+        path: PathBuf,
+    },
+    /// Run network benchmark to test network bandwidth without writing to disk
+    Benchmark {
+        /// Target IP or hostname (runs as client if specified, server if omitted)
+        #[arg(long)]
+        ip: Option<String>,
+
+        /// TCP Port to connect or bind to (default: 7878)
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+
+        /// Number of parallel streams (default: 8)
+        #[arg(short, long, default_value_t = 8)]
+        streams: usize,
+
+        /// Duration of the benchmark in seconds (default: 5)
+        #[arg(short, long, default_value_t = 5)]
+        duration: u32,
+
+        /// Bypass interactive pairing/auth prompts (runs automatically)
+        #[arg(short, long)]
+        yes: bool,
+
+        /// HMAC SHA256 pre-shared secret key for secure benchmarking
+        #[arg(long)]
+        auth: Option<String>,
     },
 }
 
@@ -215,6 +246,139 @@ fn main() {
             if let Err(e) = receiver::run_receiver(dst_dir, &listen_addr, !yes, options) {
                 eprintln!("❌ Receiver Error: {}", e);
                 std::process::exit(1);
+            }
+        }
+        Some(Commands::Preset { path }) => {
+            if let Err(e) = run_preset(path) {
+                eprintln!("❌ Preset Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Benchmark {
+            ip,
+            port,
+            streams,
+            duration,
+            yes,
+            auth,
+        }) => {
+            use std::io::Read;
+            if let Some(target_ip) = ip {
+                let receiver_addr = format!("{}:{}", target_ip, port);
+                let options = SenderOptions {
+                    auth_key: auth,
+                    control_port: port,
+                    auto_accept: yes,
+                    ..Default::default()
+                };
+                println!("🚀 Launching LAN benchmark client against {}...", receiver_addr);
+                if let Err(e) = sender::run_benchmark_sender(&receiver_addr, streams, duration, options) {
+                    eprintln!("❌ Benchmark Client Error: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                let bind_addr = format!("0.0.0.0:{}", port);
+                let listener = match std::net::TcpListener::bind(&bind_addr) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("❌ Failed to bind TCP listener on {}: {}", bind_addr, e);
+                        std::process::exit(1);
+                    }
+                };
+                let options = ReceiverOptions {
+                    auth_key: auth,
+                    control_port: port,
+                    ..Default::default()
+                };
+
+                println!("🚀 Launching LAN benchmark receiver. Listening on {}...", bind_addr);
+                loop {
+                    let (mut control_stream, client_addr) = match listener.accept() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("⚠️ Failed to accept connection: {}", e);
+                            continue;
+                        }
+                    };
+                    println!("🔌 Control stream connected from client: {}", client_addr);
+
+                    // Read magic bytes
+                    let mut magic = [0u8; 4];
+                    if control_stream.read_exact(&mut magic).is_err() { continue; }
+                    if &magic != b"FSTP" {
+                        eprintln!("⚠️ Invalid control stream magic bytes");
+                        continue;
+                    }
+
+                    // Read mode (expects 3 for benchmark)
+                    let mut mode = [0u8; 1];
+                    if control_stream.read_exact(&mut mode).is_err() { continue; }
+                    if mode[0] != 3 {
+                        eprintln!("⚠️ Invalid mode for benchmark: expected 3, got {}", mode[0]);
+                        continue;
+                    }
+
+                    // Read protocol version (expects 2)
+                    let mut version = [0u8; 1];
+                    if control_stream.read_exact(&mut version).is_err() { continue; }
+                    if version[0] != 2 {
+                        eprintln!("⚠️ Protocol version mismatch: expected 2, got {}", version[0]);
+                        continue;
+                    }
+
+                    // HMAC Auth Handshake
+                    let auth_required = options.auth_key.is_some();
+                    if control_stream.write_all(&[if auth_required { 1 } else { 0 }]).is_err() { continue; }
+                    let _ = control_stream.flush();
+
+                    if auth_required {
+                        let key = options.auth_key.as_ref().unwrap();
+                        let challenge = receiver::generate_challenge();
+                        if control_stream.write_all(&challenge).is_err() { continue; }
+                        let mut response = [0u8; 32];
+                        if control_stream.read_exact(&mut response).is_err() { continue; }
+                        let expected = networkcopy::protocol::compute_hmac(key, &challenge);
+                        if expected == response {
+                            if control_stream.write_all(&[1]).is_err() { continue; }
+                        } else {
+                            let _ = control_stream.write_all(&[0]);
+                            eprintln!("❌ HMAC authentication failed!");
+                            continue;
+                        }
+                    }
+
+                    // Pairing Handshake
+                    let pairing_required = !yes && !auth_required;
+                    if control_stream.write_all(&[if pairing_required { 1 } else { 0 }]).is_err() { continue; }
+                    let _ = control_stream.flush();
+
+                    if pairing_required {
+                        let pairing_code = receiver::generate_pairing_code();
+                        println!("\n========================================");
+                        println!("🔑 Pairing Code: {}", pairing_code);
+                        println!("========================================\n");
+
+                        let mut len_bytes = [0u8; 4];
+                        if control_stream.read_exact(&mut len_bytes).is_err() { continue; }
+                        let len = u32::from_be_bytes(len_bytes) as usize;
+                        let mut code_bytes = vec![0u8; len];
+                        if control_stream.read_exact(&mut code_bytes).is_err() { continue; }
+                        let received = String::from_utf8_lossy(&code_bytes).trim().to_string();
+
+                        if received == pairing_code {
+                            if control_stream.write_all(&[1]).is_err() { continue; }
+                        } else {
+                            let _ = control_stream.write_all(&[0]);
+                            eprintln!("❌ Pairing verification failed!");
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener) {
+                        eprintln!("⚠️ Benchmark session completed with error: {}", e);
+                    }
+                    break;
+                }
             }
         }
         None => {

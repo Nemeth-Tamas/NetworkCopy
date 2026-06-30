@@ -110,7 +110,6 @@ pub struct ReceiverOptions {
     pub pairing_code: Option<String>,
 }
 
-use sha2::{Sha256, Digest};
 
 fn get_hostname() -> String {
     std::env::var("COMPUTERNAME")
@@ -118,16 +117,17 @@ fn get_hostname() -> String {
         .unwrap_or_else(|_| "Unknown".to_string())
 }
 
-fn generate_challenge() -> [u8; 32] {
+pub fn generate_challenge() -> [u8; 32] {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let val = COUNTER.fetch_add(1, Ordering::SeqCst);
+    use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(&val.to_be_bytes());
     hasher.update(&std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos().to_be_bytes());
     hasher.finalize().into()
 }
 
-fn generate_pairing_code() -> String {
+pub fn generate_pairing_code() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let code = (nanos % 9000) + 1000;
     code.to_string()
@@ -220,7 +220,7 @@ pub fn run_receiver(
         // Read mode
         let mut mode = [0u8; 1];
         control_stream.read_exact(&mut mode)?;
-        if mode[0] != 1 {
+        if mode[0] != 1 && mode[0] != 3 {
             eprintln!("⚠️ Invalid transfer mode");
             if !options.loop_mode {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid transfer mode"));
@@ -322,6 +322,16 @@ pub fn run_receiver(
                 }
                 continue;
             }
+        }
+
+        if mode[0] == 3 {
+            if let Err(e) = crate::benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener) {
+                eprintln!("⚠️ Benchmark failed: {}", e);
+            }
+            if !options.loop_mode {
+                break;
+            }
+            continue;
         }
 
         // Run speedtest server logic (it will loop until command 0 is received)

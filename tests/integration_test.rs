@@ -570,3 +570,109 @@ fn test_unix_permissions_preservation() {
 
     let _ = fs::remove_dir_all(test_root);
 }
+
+#[test]
+fn test_json_preset_execution() {
+    let test_root = Path::new("target/test_preset_env");
+    let src_dir = test_root.join("src");
+    let dst_dir = test_root.join("dst");
+    if test_root.exists() {
+        let _ = fs::remove_dir_all(test_root);
+    }
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // Create a source file
+    let src_file_path = src_dir.join("preset_file.txt");
+    fs::write(&src_file_path, b"Preset data transfer test!").unwrap();
+
+    // Create JSON preset files for both send and receive jobs
+    let send_preset_path = test_root.join("send_preset.json");
+    let send_json = format!(
+        r#"{{
+            "role": "send",
+            "path": {:?},
+            "ip": "127.0.0.1",
+            "port": 9951,
+            "streams": 1,
+            "compress": false,
+            "no_discovery": true,
+            "yes": true
+        }}"#,
+        src_dir.to_str().unwrap().replace('\\', "/")
+    );
+    fs::write(&send_preset_path, send_json).unwrap();
+
+    let recv_preset_path = test_root.join("recv_preset.json");
+    let recv_json = format!(
+        r#"{{
+            "role": "receive",
+            "path": {:?},
+            "port": 9951,
+            "yes": true
+        }}"#,
+        dst_dir.to_str().unwrap().replace('\\', "/")
+    );
+    fs::write(&recv_preset_path, recv_json).unwrap();
+
+    // Run receiver preset in a background thread
+    let recv_preset_clone = recv_preset_path.clone();
+    let receiver_handle = thread::spawn(move || {
+        networkcopy::preset::run_preset(recv_preset_clone)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    // Run sender preset in the main thread
+    let result = networkcopy::preset::run_preset(send_preset_path);
+    assert!(result.is_ok(), "Sender preset job should complete successfully");
+
+    let _ = receiver_handle.join().unwrap();
+
+    // Verify file transferred successfully
+    let dst_file_path = dst_dir.join("preset_file.txt");
+    assert!(dst_file_path.exists(), "Preset transferred file should exist");
+    let content = fs::read_to_string(&dst_file_path).unwrap();
+    assert_eq!(content, "Preset data transfer test!");
+
+    let _ = fs::remove_dir_all(test_root);
+}
+
+#[test]
+fn test_benchmark_execution() {
+    // Run benchmark server in a background thread
+    let receiver_handle = thread::spawn(move || {
+        let bind_addr = "127.0.0.1:9941";
+        let listener = std::net::TcpListener::bind(bind_addr).unwrap();
+        loop {
+            let (mut control_stream, _) = listener.accept().unwrap();
+            let mut magic = [0u8; 4];
+            control_stream.read_exact(&mut magic).unwrap();
+            let mut mode = [0u8; 1];
+            control_stream.read_exact(&mut mode).unwrap();
+            let mut version = [0u8; 1];
+            control_stream.read_exact(&mut version).unwrap();
+            // Auth Handshake (disabled)
+            control_stream.write_all(&[0]).unwrap();
+            // Pairing Handshake (disabled because we simulate auto-accept)
+            control_stream.write_all(&[0]).unwrap();
+
+            let res = networkcopy::benchmark::run_speedtest_benchmark_server(&mut control_stream, &listener);
+            assert!(res.is_ok(), "Benchmark server should finish successfully");
+            break;
+        }
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    // Run benchmark client in the main thread
+    let options = sender::SenderOptions {
+        control_port: 9941,
+        auto_accept: true,
+        ..Default::default()
+    };
+    let result = sender::run_benchmark_sender("127.0.0.1:9941", 2, 1, options);
+    assert!(result.is_ok(), "Benchmark client should run and complete successfully");
+
+    let _ = receiver_handle.join().unwrap();
+}
