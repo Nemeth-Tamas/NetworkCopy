@@ -82,6 +82,17 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - `--auth <key>`: HMAC-SHA256 pre-shared secret key for secure transmission.
  - `--discovery-port <port>`: UDP discovery port (default: `7879`).
  - `--yes`: Bypass interactive prompts (e.g. folder picker in loop mode).
+
+ **`preset` command options:**
+ - `path`: Path to JSON preset configuration file (defines a send or receive job).
+
+ **`benchmark` command options:**
+ - `--ip <ip>`: Target Receiver IP. If specified, runs as benchmark client. If omitted, runs as benchmark server.
+ - `--port <port>`: Port to connect or bind to (default: `7878`).
+ - `--streams <n>`: Number of parallel streams to flood (default: `8`).
+ - `--duration <secs>`: Duration of the benchmark test in seconds (default: `5`).
+ - `--yes`: Bypass interactive pairing/auth prompts.
+ - `--auth <key>`: HMAC authentication key.
  
  #### Examples
  
@@ -111,6 +122,32 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  4. **Persistent Loop Mode (IT shop automation)**:
     ```powershell
     ./networkcopy.exe receive "C:\Incoming" --loop-mode
+    ```
+
+ 5. **JSON Job Presets**:
+    Create a preset configuration file `transfer_job.json`:
+    ```json
+    {
+      "role": "send",
+      "path": "C:\\Source",
+      "ip": "192.168.1.50",
+      "streams": 8,
+      "compress": true,
+      "yes": true
+    }
+    ```
+    Execute the preset job:
+    ```powershell
+    ./networkcopy.exe preset transfer_job.json
+    ```
+
+ 6. **LAN Benchmark Mode (Network Speed Testing without Disk IO)**:
+    ```powershell
+    # Receiver (Server):
+    ./networkcopy.exe benchmark
+    
+    # Sender (Client):
+    ./networkcopy.exe benchmark --ip 192.168.1.50 --duration 10
     ```
  
  ### 🖱️ Interactive Mode
@@ -160,13 +197,12 @@ To bypass the typical slowdowns associated with standard file-sharing protocols 
  - [x] **HMAC Session Authentication**: Opt-in `--auth <key>` mode signing control packets & discovery via HMAC-SHA256.
 
 ### 🚀 v2.0 (Serious Capability)
-- [ ] **Linux Cross-Platform**: Win-to-Win, Linux-to-Linux, Win-to-Linux, and Linux-to-Win path and permission handling.
-- [ ] **Partial File Resume**: Continue copying interrupted transfers from `.tmp` byte offset.
-- [ ] **Protocol Versioning**: Handshake checks for protocol versions and supported features.
-- [ ] **Transfer Presets & Manifests**: Save jobs (excludes, directories, targets) as reusable configurations.
-- [ ] **TUI (Terminal User Interface)**: Rich live terminal display of streams, speeds, and file progress.
-- [ ] **LAN Benchmark Mode**: Network-only speed testing without disk writes.
-
-### 🔒 v2.1 (Optional Hardening)
-- [ ] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 or AES-GCM (implies `--auth` and requires pairing code).
-
+ - [x] **Linux Cross-Platform**: Win-to-Win, Linux-to-Linux, Win-to-Linux, and Linux-to-Win path and permission handling.
+ - [x] **Partial File Resume**: Continue copying interrupted transfers from `.tmp` byte offset.
+ - [x] **Protocol Versioning**: Handshake checks for protocol versions and supported features.
+ - [x] **Transfer Presets & Manifests**: Save jobs (excludes, directories, targets) as reusable configurations.
+ - [x] **TUI (Terminal User Interface)**: Rich live terminal display of streams, speeds, and file progress (indicatif integration).
+ - [x] **LAN Benchmark Mode**: Network-only speed testing without disk writes.
+ 
+ ### 🔒 v2.1 (Optional Hardening)
+ - [ ] **Opt-in Transfer Encryption**: `--encrypt` mode using ChaCha20-Poly1305 or AES-GCM (implies `--auth` and requires pairing code).
