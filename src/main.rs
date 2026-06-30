@@ -264,6 +264,22 @@ fn main() {
                 encrypt,
             };
 
+            #[cfg(windows)]
+            {
+                if !receiver::is_admin() && !yes {
+                    let relaunch = dialoguer::Confirm::new()
+                        .with_prompt("⚠️ Receiver is not running as Administrator. Windows Defender Firewall might block incoming connections. Relaunch as Administrator?")
+                        .default(true)
+                        .interact()
+                        .unwrap_or(false);
+                    if relaunch {
+                        if let Err(e) = receiver::relaunch_as_admin() {
+                            eprintln!("❌ Failed to relaunch as Administrator: {}", e);
+                        }
+                    }
+                }
+            }
+
             println!("🚀 Running in CLI Receiver mode...");
             println!("📂 Destination: {:?}", dst_dir);
             println!("👂 Listening on {}...", listen_addr);
@@ -710,6 +726,22 @@ fn run_sender_wizard() {
 }
 
 fn run_receiver_wizard() {
+    #[cfg(windows)]
+    {
+        if !receiver::is_admin() {
+            let relaunch = dialoguer::Confirm::new()
+                .with_prompt("⚠️ Receiver is not running as Administrator. Windows Defender Firewall might block incoming connections on virtual/VPN adapters. Relaunch as Administrator?")
+                .default(true)
+                .interact()
+                .unwrap_or(false);
+            if relaunch {
+                if let Err(e) = receiver::relaunch_as_admin() {
+                    eprintln!("❌ Failed to relaunch as Administrator: {}", e);
+                }
+            }
+        }
+    }
+
     let dst_dir = match pick_folder_wizard("Select Destination Folder for Downloads", false) {
         Some(d) => d,
         None => {

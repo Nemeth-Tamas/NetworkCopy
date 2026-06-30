@@ -208,6 +208,25 @@ pub fn run_receiver(
     let stop_broadcaster_clone = Arc::clone(&stop_broadcaster);
     // Parse port from listen_addr (default 7878 if parsing fails)
     let port = listen_addr.split(':').last().and_then(|p| p.parse::<u16>().ok()).unwrap_or(7878);
+
+    struct FirewallGuard {
+        is_elevated: bool,
+    }
+
+    impl Drop for FirewallGuard {
+        fn drop(&mut self) {
+            if self.is_elevated {
+                remove_firewall_rules();
+            }
+        }
+    }
+
+    let is_elevated = is_admin();
+    if is_elevated {
+        add_firewall_rules(port, options.discovery_port);
+    }
+    let _fw_guard = FirewallGuard { is_elevated };
+
     start_udp_broadcaster(port, options.discovery_port, options.auth_key.clone(), stop_broadcaster_clone)?;
 
     let hostname = get_hostname();
@@ -832,5 +851,101 @@ pub fn pick_folder_wizard(title: &str, require_exists: bool) -> Option<PathBuf> 
                 println!("❌ The path exists but is not a directory. Please try again.");
             }
         }
+    }
+}
+
+pub fn is_admin() -> bool {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("net")
+            .arg("session")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub fn relaunch_as_admin() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let current_exe = std::env::current_exe()?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut powershell_args = format!(
+            "Start-Process -FilePath '{}' -ArgumentList ",
+            current_exe.to_string_lossy()
+        );
+        let escaped_args: Vec<String> = args.iter().map(|arg| format!("'{}'", arg)).collect();
+        powershell_args.push_str(&format!("@({})", escaped_args.join(",")));
+        powershell_args.push_str(" -Verb RunAs");
+
+        std::process::Command::new("powershell")
+            .arg("-Command")
+            .arg(&powershell_args)
+            .spawn()?;
+        std::process::exit(0);
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+
+pub fn add_firewall_rules(port: u16, discovery_port: u16) {
+    #[cfg(windows)]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            let exe_str = exe_path.to_string_lossy();
+            let _ = std::process::Command::new("netsh")
+                .args(&[
+                    "advfirewall", "firewall", "add", "rule",
+                    "name=NetworkCopy-Inbound",
+                    "dir=in",
+                    &format!("program={}", exe_str),
+                    "action=allow",
+                    "protocol=TCP",
+                    &format!("localport={}", port),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+
+            let _ = std::process::Command::new("netsh")
+                .args(&[
+                    "advfirewall", "firewall", "add", "rule",
+                    "name=NetworkCopy-Discovery",
+                    "dir=in",
+                    &format!("program={}", exe_str),
+                    "action=allow",
+                    "protocol=UDP",
+                    &format!("localport={}", discovery_port),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            println!("🛡️ Added temporary Windows Defender Firewall rule for TCP port {} and UDP port {}.", port, discovery_port);
+        }
+    }
+}
+
+pub fn remove_firewall_rules() {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("netsh")
+            .args(&["advfirewall", "firewall", "delete", "rule", "name=NetworkCopy-Inbound"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("netsh")
+            .args(&["advfirewall", "firewall", "delete", "rule", "name=NetworkCopy-Discovery"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        println!("🛡️ Removed temporary Windows Defender Firewall rules.");
     }
 }
