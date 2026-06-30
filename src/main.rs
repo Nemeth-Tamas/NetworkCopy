@@ -815,9 +815,11 @@ fn print_sender_troubleshooting(err: &std::io::Error) {
     eprintln!("❌ Sender Error: {}", err);
     eprintln!("\n💡 Troubleshooting Tips:");
     eprintln!("   1. Verify the Receiver is actually running and listening.");
-    eprintln!("   2. Check that both machines are on the same local network / Wi-Fi subnet.");
-    eprintln!("   3. Ensure Windows Firewall or other security software is not blocking TCP port 7878 / UDP port 7879.");
-    eprintln!("   4. Double-check that the Receiver's IP address is correct.");
+    eprintln!("   2. Check if both machines are on the same local subnet or virtual overlay network (e.g. WireGuard).");
+    eprintln!("   3. Ensure Windows Defender Firewall or Mikrotik routing rules allow traffic on TCP port 7878 / UDP port 7879.");
+    eprintln!("   4. Virtual/VPN/Overlay adapters (like WireGuard) are often classified as 'Public' networks by Windows, which blocks inbound TCP connections by default. Allow the app through Windows Firewall, or run this PowerShell command as Administrator on the Receiver:");
+    eprintln!("      New-NetFirewallRule -DisplayName \"NetworkCopy TCP\" -Direction Inbound -LocalPort 7878 -Protocol TCP -Action Allow");
+    eprintln!("   5. Double-check the target IP address. Make sure to use the virtual WireGuard interface IP of the Receiver rather than its local physical LAN IP (unless routing/NAT between subnets is configured on the Mikrotik).");
 }
 
 fn print_receiver_troubleshooting(err: &std::io::Error, port: u16) {
